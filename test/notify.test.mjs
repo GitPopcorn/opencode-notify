@@ -8,6 +8,9 @@
  */
 
 import assert from "node:assert"
+import * as os from "node:os"
+import * as path from "node:path"
+import * as fs from "node:fs"
 import { createNotifyPlugin, classifyError } from "../dist/kdco-notify-win/kdco-notify-win.js"
 
 let passed = 0
@@ -38,7 +41,7 @@ function makeSessionClient(parentID) {
 	}
 }
 
-async function makeHarness({ client, config, platform = "win32", clock = null }) {
+async function makeHarness({ client, config, platform = "win32", clock = null, dedupeStorePath = null }) {
 	const sent = []
 	const beeps = []
 	const notifierImpl = (opts) => sent.push(opts)
@@ -53,6 +56,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null })
 		beep: (flag) => {
 			if (flag) beeps.push(1)
 		},
+		dedupeStorePath: dedupeStorePath ?? path.join(os.tmpdir(), `kdco-notify-test-${Math.random().toString(36).slice(2)}.json`),
 	})
 
 	const pluginDone = await pluginFactory({ client })
@@ -169,6 +173,17 @@ async function main() {
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
+	})
+
+	await test("cross-instance: two plugin instances sharing a store send only once", async () => {
+		// Simulates global + project plugins dirs both loading the plugin.
+		const sharedPath = path.join(os.tmpdir(), `kdco-notify-cross-${Math.random().toString(36).slice(2)}.json`)
+		const a = await makeHarness({ client: makeSessionClient(), config: baseConfig(), dedupeStorePath: sharedPath })
+		const b = await makeHarness({ client: makeSessionClient(), config: baseConfig(), dedupeStorePath: sharedPath })
+		await a.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		await b.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(a.sent.length + b.sent.length, 1)
+		fs.rmSync(sharedPath, { force: true })
 	})
 
 	await test("permission.updated notifies", async () => {

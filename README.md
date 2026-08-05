@@ -64,6 +64,8 @@ The plugin loads standalone even if deps are missing, but logs a warning instead
 
 Behavior: parent-session filtering (no sub-task spam), quiet-hours suppression, 1.5s dedupe windows, and terminal detection (for logging/context only — Windows has no focus suppression).
 
+> **Cross-instance dedupe:** OpenCode loads plugins from both the global plugins dir and the project `.opencode/plugins` dir. If the same plugin is installed in both places, it runs as **two instances**, each with its own in-memory state. To avoid duplicate toasts, recent-notify timestamps are shared through the dedupe file `os.tmpdir()/kdco-notify-win-dedupe.json`, so all instances agree on what was just sent. If you still see duplicates, it's usually from a stale older copy of the plugin still installed somewhere.
+
 ## Network Interruption Detection
 
 The original record asked whether the plugin can notify on **explicit** interruptions (HTTP 503/401/500/429/...) and **implicit** mid-stream disconnects (response cut while streaming).

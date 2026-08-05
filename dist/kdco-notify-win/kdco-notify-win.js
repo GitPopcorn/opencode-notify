@@ -11,6 +11,7 @@
  *  - Task complete / error / permission / question notifications
  *  - Quiet-hours suppression
  *  - Parent-session filtering (no sub-task spam) + 1.5s dedupe windows
+ *    (timestamps shared across plugin instances via a tmpdir store)
  *  - Network interruption detection: explicit HTTP errors (503/401/500/429/...)
  *    and implicit mid-stream disconnects (ECONNRESET / socket hang up / aborted / fetch failed / ...)
  *    get a distinct "Network interrupted" title + optional system beep.
@@ -24,6 +25,7 @@
  */
 
 import * as fs from "node:fs/promises"
+import * as fsSync from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { createRequire } from "node:module"
@@ -325,24 +327,65 @@ async function getSessionTitle(client, sessionID, info) {
 const DEDUPE_WINDOW_MS = 1500
 
 /**
- * @typedef {Object} NotifyScreen
- * @property {(opts:any)=>void} notify
+ * A cross-instance dedupe store backed by a JSON file on disk.
+ *
+ * OpenCode loads plugins from BOTH the global plugins dir and the project
+ * .opencode/plugins dir, so the same plugin can run as two instances (each
+ * with its own in-memory state). Without a shared store, a single "done"
+ * event produces TWO toasts. Persisting recent-notify timestamps to a file in
+ * os.tmpdir() lets every instance see the same history and suppress dupes.
+ * @param {string} filePath
+ */
+function createSharedDedupeStore(filePath) {
+	return {
+		/** @returns {Map<string, number>} */
+		load() {
+			try {
+				const raw = fsSync.readFileSync(filePath, "utf8")
+				return new Map(Object.entries(JSON.parse(raw)))
+			} catch {
+				return new Map()
+			}
+		},
+		/** @param {Map<string, number>} map */
+		save(map) {
+			try {
+				const tmp = `${filePath}.${process.pid}.tmp`
+				fsSync.writeFileSync(tmp, JSON.stringify(Object.fromEntries(map)))
+				fsSync.renameSync(tmp, filePath)
+			} catch {
+				// best effort
+			}
+		},
+	}
+}
+
+/**
+ * @typedef {Object} Dedupe
+ * @property {(key:string)=>boolean} shouldSend
  */
 
-function createDedupe() {
-	const recent = new Map()
+/**
+ * @param {ReturnType<typeof createSharedDedupeStore> | null} [store]
+ * @returns {Dedupe}
+ */
+function createDedupe(store = null) {
 	return {
 		/** @returns {boolean} true if this notify should be sent (not recently sent) */
 		shouldSend(key) {
 			const now = Date.now()
+			const recent = store ? store.load() : new Map()
 			for (const [k, ts] of recent) {
 				if (now - ts >= DEDUPE_WINDOW_MS) recent.delete(k)
 			}
+			let should = true
 			if (key !== undefined && key !== null && now - (recent.get(key) ?? 0) < DEDUPE_WINDOW_MS) {
-				return false
+				should = false
+			} else {
+				recent.set(key, now)
 			}
-			recent.set(key, now)
-			return true
+			if (store) store.save(recent)
+			return should
 		},
 	}
 }
@@ -377,16 +420,20 @@ export function createNotifyPlugin(overrides = {}) {
 		},
 		readConfig = loadConfig,
 		beep = playInterruptionBeep,
+		// Path of the cross-instance dedupe store (os.tmpdir by default). Set to
+		// a unique temp path in tests to keep harnesses isolated from each other.
+		dedupeStorePath = path.join(os.tmpdir(), "kdco-notify-win-dedupe.json"),
 	} = overrides
 
 	return async function NotifyPlugin(ctx) {
 		const { client } = ctx ?? {}
 
 		const config = await readConfig()
-		const questionDedupe = createDedupe()
-		const readyDedupe = createDedupe()
-		const permissionDedupe = createDedupe()
-		const errorDedupe = createDedupe()
+		const dedupeStore = createSharedDedupeStore(dedupeStorePath)
+		const questionDedupe = createDedupe(dedupeStore)
+		const readyDedupe = createDedupe(dedupeStore)
+		const permissionDedupe = createDedupe(dedupeStore)
+		const errorDedupe = createDedupe(dedupeStore)
 
 		// Register a branded Start-Menu shortcut for the toast app icon (once).
 		try {
