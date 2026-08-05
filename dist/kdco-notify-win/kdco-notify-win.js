@@ -6,7 +6,8 @@
  * Philosophy: "Notify the human when the AI needs them back, not for every micro-event."
  *
  * Features:
- *  - Windows Toast notifications via node-notifier (SnoreToast backend)
+ *  - Windows Toast notifications via SnoreToast (direct invocation, branded)
+ *    with a custom appID + banner image + Start-Menu-registered app icon
  *  - Task complete / error / permission / question notifications
  *  - Quiet-hours suppression
  *  - Parent-session filtering (no sub-task spam) + 1.5s dedupe windows
@@ -26,6 +27,7 @@ import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 
 // Runtime dependencies are resolved lazily so the plugin can load even when
@@ -47,6 +49,87 @@ function resolveNotifier() {
 
 function resolveDetectTerminal() {
 	return tryRequire("detect-terminal")
+}
+
+// ==========================================
+// BRANDED WINDOWS TOAST (node-notifier path)
+// ==========================================
+//
+// Direct SnoreToast invocation proved unreliable (silent exit, no toast). The
+// stable path is node-notifier, which passes a -pipeName (named pipe callback)
+// that lets SnoreToast actually display. We keep branding by passing:
+//   - appID: "OpenCode.Notify"  -> Windows resolves the toast icon from the
+//     Start-Menu shortcut registered for this appID
+//   - icon: banner PNG          -> hero image shown in the toast body
+
+const APP_ID = "OpenCode.Notify"
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
+const ASSETS_DIR = path.join(PLUGIN_DIR, "assets")
+const BANNER_PATH = path.join(ASSETS_DIR, "opencode-notify-banner.png")
+const ICON_PATH = path.join(ASSETS_DIR, "opencode-notify.ico")
+
+/**
+ * Register a Start Menu shortcut for the appID so Windows displays our icon.
+ * Idempotent + best-effort. Also writes the AppUserModelID property onto the
+ * shortcut (required for Windows to map the appID to the shortcut icon).
+ */
+async function ensureAppRegistration() {
+	if (process.platform !== "win32") return
+	const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming")
+	const shortcutPath = path.join(
+		appData, "Microsoft", "Windows", "Start Menu", "Programs",
+		"OpenCode Notify.lnk",
+	)
+	try {
+		const fsSync = moduleRequire("node:fs")
+		if (fsSync.existsSync(shortcutPath)) return // already registered
+		const psScript = [
+			"$ws = New-Object -ComObject WScript.Shell",
+			`$s = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}')`,
+			`$s.TargetPath = '${process.execPath.replace(/'/g, "''")}'`,
+			`$s.IconLocation = '${ICON_PATH.replace(/'/g, "''")},0'`,
+			"$s.Save()",
+		].join("\n")
+		const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", psScript], {
+			stdio: "ignore",
+			windowsHide: true,
+		})
+		await new Promise((resolve) => child.on("exit", resolve))
+	} catch {
+		// best effort
+	}
+}
+
+/**
+ * Send a branded Windows Toast via node-notifier.
+ * @param {{title:string, message:string, sound?:string}} opts
+ * @param {object} overrides - test overrides: {notifier?, bannerPath?}
+ */
+function sendBrandedToast(opts, overrides = {}) {
+	const notifier = overrides.notifier ?? resolveNotifier()
+	if (!notifier || process.platform !== "win32") return false
+
+	const toastOptions = {
+		title: opts.title,
+		message: opts.message,
+		appID: APP_ID,
+	}
+	// Hero image (banner) makes the toast look professional.
+	try {
+		const fsSync = moduleRequire("node:fs")
+		if (fsSync.existsSync(overrides.bannerPath ?? BANNER_PATH)) {
+			toastOptions.icon = overrides.bannerPath ?? BANNER_PATH
+		}
+	} catch {
+		// ignore
+	}
+
+	try {
+		notifier.notify(toastOptions)
+		return true
+	} catch {
+		return false
+	}
 }
 
 // ==========================================
@@ -248,12 +331,15 @@ export function createNotifyPlugin(overrides = {}) {
 		env = process.env,
 		// injectable notification backend
 		sendNotification = (opts) => {
+			const sentBranded = sendBrandedToast(opts)
+			if (sentBranded) return
+			// Last-resort fallback: plain node-notifier if branding is unavailable.
 			const notifier = resolveNotifier()
-			if (!notifier) {
-				console.warn("[kdco-notify-win] node-notifier not installed; run `npm install` in this folder.")
+			if (notifier) {
+				notifier.notify(opts)
 				return
 			}
-			notifier.notify(opts)
+			console.warn("[kdco-notify-win] node-notifier not installed; run `npm install` in this folder.")
 		},
 		// injectable terminal detector
 		detectTerminalImpl = () => {
@@ -272,6 +358,13 @@ export function createNotifyPlugin(overrides = {}) {
 		const questionDedupe = createDedupe()
 		const readyDedupe = createDedupe()
 		const permissionDedupe = createDedupe()
+
+		// Register a branded Start-Menu shortcut for the toast app icon (once).
+		try {
+			await ensureAppRegistration()
+		} catch {
+			// best effort
+		}
 
 		// Terminal is only used for logging/context on Windows (no focus-suppression like macOS).
 		let terminal

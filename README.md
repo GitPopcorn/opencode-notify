@@ -94,6 +94,22 @@ Design notes visible to maintainers:
 - `createNotifyPlugin(overrides)` is a dependency-injected factory — the plugin is fully testable without `node-notifier` installed.
 - Runtime deps (`node-notifier`, `detect-terminal`) are resolved lazily via `createRequire`, so the file loads even before `npm install`.
 
+## Branded toasts
+
+Toasts are branded with a custom app icon + hero banner:
+
+- **App icon**: `assets/opencode-notify.ico`. On first run the plugin registers a Start Menu shortcut (`OpenCode Notify.lnk`) carrying the `OpenCode.Notify` AppUserModelID, so Windows shows our icon in the toast.
+- **Hero banner**: `assets/opencode-notify-banner.png` (620x180 PNG) is passed as the toast `icon`, displayed as the large banner under the title.
+- Toasts are sent through `node-notifier` (NOT direct SnoreToast) because only the node-notifier path passes a `-pipeName` that makes SnoreToast actually display reliably; branding rides on `appID` + `icon` options.
+- `assets/` can be regenerated from `test` tooling; the PNG must stay ≤1024x1024 and ≤200KB (Windows toast image limits).
+
+Regenerate assets:
+
+```bash
+python -m pip install pillow
+python scripts/gen-notify-assets.py
+```
+
 ## License
 
 MIT
