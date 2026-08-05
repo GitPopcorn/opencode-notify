@@ -9,10 +9,33 @@
  */
 import { createNotifyPlugin } from "../dist/kdco-notify-win/kdco-notify-win.js"
 
-const plugin = await createNotifyPlugin({})({
+const plugin = await createNotifyPlugin({
+	readConfig: async () => ({
+		notifyChildSessions: false,
+		sounds: { idle: "Glass", error: "Basso", permission: "Submarine", question: "Submarine", network: "Basso" },
+		quietHours: { enabled: false, start: "22:00", end: "08:00" },
+		beepOnInterruption: true,
+		showTimestamp: true,
+		showSummary: true,
+		summarySteps: 3,
+		themedIcons: true,
+		soundOverride: "",
+		clickProgram: "",
+		clickArgs: [],
+	}),
+})({
 	client: {
 		session: {
 			get: async () => ({ data: { title: "demo task", parentID: null } }),
+			messages: async () => [
+				{
+					info: { id: "m1", role: "assistant", sessionID: "demo" },
+					parts: [
+						{ type: "tool", tool: "read", state: { title: "Read file /a.txt" } },
+						{ type: "tool", tool: "bash", state: { title: "Bash ls" } },
+					],
+				},
+			],
 		},
 	},
 })

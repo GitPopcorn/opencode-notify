@@ -85,19 +85,36 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
 {
   "notifyChildSessions": false,
   "sounds": {
-    "idle": "Glass",
-    "error": "Basso",
-    "permission": "Submarine",
-    "question": "Submarine",
-    "network": "Basso"
+    "idle": "Notification.Mail",
+    "error": "Notification.Reminder",
+    "permission": "Notification.SMS",
+    "question": "Notification.IM",
+    "network": "Notification.Mail"
   },
   "quietHours": { "enabled": false, "start": "22:00", "end": "08:00" },
-  "beepOnInterruption": true
+  "beepOnInterruption": true,
+  "showTimestamp": true,
+  "showSummary": true,
+  "summarySteps": 3,
+  "themedIcons": true,
+  "iconTheme": "legacy",
+  "soundOverride": "",
+  "clickProgram": "",
+  "clickArgs": []
 }
 ```
 
 Notes:
-- `sound` is a no-op on Windows — SnoreToast ignores custom sounds. Keep it for config compatibility; use `beepOnInterruption` for an audible cue.
+- **`sound`** — a Windows toast preset name in the `Notification.*` namespace (`Notification.Mail`, `Notification.Reminder`, `Notification.SMS`, `Notification.IM`, `Notification.Looping.Call`, …). Values that are NOT `Notification.*`-prefixed (the old `Glass`/`Basso`/`Submarine` names) are normalized to `Notification.Reminder`, because SnoreToast rejects bare names and shows no toast at all. Verified audible on this machine: `Mail`, `Reminder`, `SMS`, `IM`, `Looping.Call`. `Notification.Default` is **silent** on this system, so it is avoided as a default.
+- **`soundOverride`** — a `Notification.*` preset name that overrides the per-kind `sound`. (SnoreToast's `-s` accepts sound URIs / `ms-winsoundevent` names; absolute `.wav` paths are not supported and are normalized to `Notification.Reminder`.)
+- **`clickProgram` + `clickArgs`** — open something when the toast is clicked. For example to open Windows Terminal with OpenCode:
+  ```json
+  { "clickProgram": "wt.exe", "clickArgs": ["-d", ".", "opencode"] }
+  ```
+  Click-to-open uses `-application` (and `-la` for its args), which only works because the self-hosted sender passes those flags — node-notifier's whitelist dropped them.
+- **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`).
+- **`showSummary` / `summarySteps`** — for READY notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).
+- **`themedIcons`** — use the per-kind colored hero banner (ready=green, error=orange, network=red, permission=yellow, question=blue) when the asset exists (default `true`).
 - `terminal` (optional) overrides terminal auto-detection.
 - `quietHours` supports overnight windows (e.g. `22:00`–`08:00`).
 
@@ -128,10 +145,11 @@ Design notes visible to maintainers:
 
 Toasts are branded with a custom app icon + hero banner:
 
-- **App icon**: `assets/opencode-notify.ico`. On first run the plugin registers a Start Menu shortcut (`OpenCode Notify.lnk`) carrying the `OpenCode.Notify` AppUserModelID, so Windows shows our icon in the toast.
-- **Hero banner**: `assets/opencode-notify-banner.png` (620x180 PNG) is passed as the toast `icon`, displayed as the large banner under the title.
-- Toasts are sent through `node-notifier` (NOT direct SnoreToast) because only the node-notifier path passes a `-pipeName` that makes SnoreToast actually display reliably; branding rides on `appID` + `icon` options.
-- `assets/` can be regenerated from `test` tooling; the PNG must stay ≤1024x1024 and ≤200KB (Windows toast image limits).
+- **App icon**: `assets/opencode-notify.ico` (flat) / `assets/legacy/legacy.ico` (legacy). On first run the plugin registers a Start Menu shortcut (`OpenCode Notify.lnk`) carrying the `OpenCode.Notify` AppUserModelID, so Windows shows our icon in the toast. The icon follows `iconTheme` (`"flat"` | `"legacy"`), and switching themes rebuilds the shortcut's icon.
+- **Hero banner**: a 620x180 PNG passed as the toast `icon`, displayed as the large banner under the title. When `themedIcons` is on, each notification kind uses a color-coded banner (ready=green / error=orange / network=red / permission=yellow / question=blue); otherwise it falls back to the generic banner. Both icon themes ship their own banners (`assets/opencode-notify-banner*.png` for flat, `assets/legacy/legacy-banner*.png` for legacy).
+- **`iconTheme`** — selects the icon set (`"flat"` full-gradient + white logo, or `"legacy"` square blue-gradient block + thin color border + terminal `≥`). Default is `"legacy"`.
+- **Self-hosted sender**: toasts are sent by invoking the vendored SnoreToast directly, replicating node-notifier's named-pipe mechanics (a unique `\\.\pipe\notifierPipe-<uuid>` passed as `-pipeName`, which is what lets SnoreToast display reliably). Because we no longer route through node-notifier's argument whitelist, we can also pass `-application`/`-la` (click-to-open). The vendored `node-notifier` package is only used as a source of the `snoretoast-x64.exe` binary.
+- `assets/` can be regenerated from the script; the PNG must stay ≤1024x1024 and ≤200KB (Windows toast image limits).
 
 Regenerate assets:
 

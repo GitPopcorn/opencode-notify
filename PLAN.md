@@ -97,3 +97,50 @@ opencode-notify/
 - `E:\vscode-workspace-temp\docs\dev\opencode-notify\2026-07-28-04-PROMPT：@kdco／notify Windows Fork — 项目规约与实现指引.md`
 - `2026-07-28-01 / 02 / 05`（QQ 通知方案、通知套件搭建指南）
 - `2026-07-28-03`（原始会话导出，任务完成提示配置）
+
+---
+
+## 8. 扩展轮（2026-08-05）：时间戳 + 步骤摘要 + 主题图标 + 声音/点击增强
+
+> 记录在 fork 稳定（重复通知问题已修复并部署）之后的一轮功能扩展。完整排查经过见
+> `E:\vscode-workspace-temp\docs\rec\2026-08-05-OpenCode通知插件重复通知排查与跨实例去重改造记录.md`。
+
+### 需求
+
+1. **主需求**：通知正文带 `[yyyy-MM-dd HH:mm:ss]` 时间戳行 + 最近会话步骤摘要（单行）。
+2. **问题 01**：网络中断（error）与 READY FOR REVIEW（idle）会**同时**弹两个通知 —— 应在 error 后抑制同一 session 的后续 ready。
+3. **扩 1**：按通知类型使用**不同颜色的主题 banner**（ready=绿 / error=橙 / network=红 / permission=黄 / question=蓝）。
+4. **扩 2**：可配置自定义音频文件 + 预设系统铃声。
+5. **扩 3**：点击通知跳转 Windows Terminal 并启动 `opencode` CLI。
+
+### 实现方式
+
+| 能力 | 手段 |
+|---|---|
+| 时间戳 | `formatTimestamp()` → `[yyyy-MM-dd HH:mm:ss]`，`composeMessage` 首行。可用 `showTimestamp:false` 关闭。 |
+| 步骤摘要 | `buildStepSummary(client, sessionID, maxSteps)` 走 OpenCode SDK `client.session.messages`，从最新消息往前收集 assistant 工具 part 的 `title`/`state.title`，去重后用 ` → ` 拼接成一行。`showSummary` / `summarySteps` 控制。 |
+| 问题 01 | `handleSessionError` 里先把 `ready:${sessionID}` 标记进跨实例去重表，后续 idle 触发的 ready 直接被去重吞掉。 |
+| 主题图标 | `THEMED_BANNERS` 映射 theme→PNG；`gen-notify-assets.py` 按 `themes` 字典为每个主题生成一条同款布局、不同强调色竖条 + 副标题的 banner。`themedIcons:false` 可回退到通用 banner。 |
+| 自定义声音 / 点击 | 改为**自托管发送器**：不再依赖 node-notifier 的白名单。`sendWindowsToast` 照抄 node-notifier 的命名管道机制（`net.createServer` + 唯一 `\\.\pipe\notifierPipe-<uuid>` 作为 `-pipeName`，保证稳定显示），同时用 `buildSnoreToastArgs` 自由拼装 `-s`（预设/音频文件）、`-application`/`-la`（点击跳转）等 node-notifier 白名单本会丢弃的参数。`node-notifier` 包仅作 `snoretoast-x64.exe` 二进制的来源保留。 |
+
+### 新增配置
+
+```json
+{
+  "showTimestamp": true,
+  "showSummary": true,
+  "summarySteps": 3,
+  "themedIcons": true,
+  "soundOverride": "",
+  "clickProgram": "",
+  "clickArgs": []
+}
+```
+
+### 状态
+
+- [x] 37 项自测全绿（含时间戳格式、步骤摘要、error 抑制 ready、主题透传、声音覆盖、点击参数透传，以及自托管发送器的 `-pipeName` 唯一性 / 参数齐全性 / 非 Windows 跳过）。
+- [x] 5 张主题 banner + 通用 banner 由 `scripts/gen-notify-assets.py` 生成。
+- [x] 部署到全局 `~/.config/opencode/plugins/` 与项目 `.opencode/plugins/`，hash 与源码一致。
+- [x] `test/demo.mjs` 用真实 SnoreToast 弹窗验证（时间戳 + 摘要 + ready 主题 banner）。
+- [x] 自托管 `sendWindowsToast` 已用真实 vendored `snoretoast-x64.exe` 弹窗验证（含 `-pipeName`）。
