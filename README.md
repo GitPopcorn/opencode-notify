@@ -4,29 +4,50 @@
 
 A plugin for [OpenCode](https://github.com/sst/opencode) that delivers Windows Toast notifications when tasks complete, errors occur, the AI needs your input, or the network connection is interrupted.
 
-This is a **Windows 10/11-only** fork. All macOS (alerter / focus detection), Linux (`notify-send`), and cmux paths have been removed. One JS file + two runtime npm packages, dropped straight into `.opencode/plugins/` — no OCX, no build step.
+This is a **Windows 10/11-only** fork. All macOS (alerter / focus detection), Linux (`notify-send`), and cmux paths have been removed. One JS file + two runtime npm packages, dropped straight into the plugins directory — no OCX, no build step.
 
 ## Install (offline-friendly)
 
-```bash
-# 1. Copy this folder into your project or global plugins dir
-copy dist\kdco-notify-win  %USERPROFILE%\.config\opencode\plugins\kdco-notify-win
+> **Critical:** OpenCode only auto-loads plugins that are **direct `.js`/`.ts` files** in the plugins directory. It does **NOT** recurse into subdirectories. So the plugin files must be flattened into the plugins root — not nested in a `kdco-notify-win/` subfolder.
 
-# 2. Vendored deps (node-notifier + detect-terminal)
-cd %USERPROFILE%\.config\opencode\plugins\kdco-notify-win
-npm install
+### One-command deploy (recommended)
 
-# 3. Restart OpenCode
+```powershell
+# Global (all projects)
+powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target global
+
+# Or project-only
+powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target "E:\path\to\project"
+```
+
+Resulting layout (this is what must be in the plugins root):
+
+```
+~/.config/opencode/plugins/          (or .opencode/plugins/)
+├── kdco-notify-win.js     # entry — auto-loaded
+├── assets/                # icon + banner
+└── node_modules/          # vendored node-notifier + detect-terminal
+```
+
+### Manual copy
+
+```powershell
+# Copy the flattened contents INTO the plugins root (not as a subfolder)
+copy dist\kdco-notify-win\kdco-notify-win.js  %USERPROFILE%\.config\opencode\plugins\
+xcopy dist\kdco-notify-win\node_modules       %USERPROFILE%\.config\opencode\plugins\node_modules\ /E
+xcopy dist\kdco-notify-win\assets             %USERPROFILE%\.config\opencode\plugins\assets\ /E
+
+# 2. Restart OpenCode (plugins load at startup)
 ```
 
 Global vs project scope:
 
-| Scope | Path |
+| Scope | Entry file location |
 |---|---|
-| Global (all projects) | `~/.config/opencode/plugins/kdco-notify-win/` |
-| Project-only | `.opencode/plugins/kdco-notify-win/` |
+| Global (all projects) | `~/.config/opencode/plugins/kdco-notify-win.js` |
+| Project-only | `.opencode/plugins/kdco-notify-win.js` |
 
-The plugin loads standalone even if deps are missing, but logs a warning instead of crashing. Run `npm install` inside the folder to vendor `node_modules`.
+The plugin loads standalone even if deps are missing, but logs a warning instead of crashing. `dist/kdco-notify-win/node_modules` is already vendored; re-run `npm install` there only if you change deps.
 
 ## How It Works
 
@@ -89,6 +110,13 @@ node test/notify.test.mjs
 # Demo: real Windows Toast (after `npm install` in dist/kdco-notify-win)
 node test/demo.mjs
 ```
+
+### Debugging why the plugin doesn't fire
+
+- **Loaded?** Plugins print nothing by default. Add a temporary `console.log(...)` at the top of the plugin file, then run `opencode run --print-logs --log-level DEBUG "hi"` in any project — your log appears if (and only if) OpenCode loaded the file.
+- **Event reached?** The plugin's `event` handler logs nothing today. To trace, add `console.log("[kdco-notify] event", event?.type)` inside the `event` handler and re-run.
+- **Main log file:** `~/.local/share/opencode/log/opencode.log` — search it for `kdco-notify` / plugin errors.
+- **Restart required:** plugins load at OpenCode startup. Restart the app (normal exit, not a hard `KILL` unless the process is hung) after deploying.
 
 Design notes visible to maintainers:
 - `createNotifyPlugin(overrides)` is a dependency-injected factory — the plugin is fully testable without `node-notifier` installed.

@@ -79,12 +79,16 @@ opencode-notify/
 
 ## 6. 自测与验收清单
 
-- [ ] `main` 分支已知残缺，`dev` 分支产物可被 Node/Bun 直接 import 且无编译错误。
-- [ ] 自测脚本全部通过（完成 / 出错 / 网络中断 / 父会话 / 静默 / 去重 / 提问）。
-- [ ] demo 脚本可驱动一次真实 `node-notifier`（若本机装了依赖）弹出 Toast。
-- [ ] 产物不含任何 cmux / macOS / Linux 引用（`grep -i cmux|darwin|osascript|notify-send` 为空）。
-- [ ] 依赖收敛为 `node-notifier` + `detect-terminal` 两个。
-- [ ] README 已更新为 Windows fork 说明与安装/配置。
+- [x] `dev` 分支产物可被 Node/Bun 直接 import 且无编译错误。
+- [x] 自测脚本全部通过（完成 / 出错 / 网络中断 / 父会话 / 静默 / 去重 / 提问）。
+- [x] demo 脚本可驱动一次真实 `node-notifier` 弹出带品牌图标的 Toast。
+- [x] 产物不含任何 cmux / macOS / Linux 引用（`grep -i cmux|darwin|osascript|notify-send` 为空）。
+- [x] 依赖收敛为 `node-notifier` + `detect-terminal` 两个。
+- [x] README 已更新为 Windows fork 说明与安装/配置。
+
+> **已核实（2026-08-05）**：`git diff upstream/main main` 为空 —— fork 基线与原项目完全一致，`status.ts`/`title.ts`/`kdco-primitives/cmux.ts` 在原项目里**本来就不存在**，不是 fork 丢失。原项目自身的 `notify.ts` 就引用了这些不存在的模块（原项目不可运行）。
+>
+> **部署方式修正**：OpenCode 1.18.12 只自动加载 plugins 目录下的**直接 `.js`/`.ts` 文件**，不递归子目录包。插件必须单文件平铺到 plugins 根（见 `scripts/deploy.ps1`），此前按子目录 `kdco-notify-win/` 部署导致未加载（已实测确认）。
 
 ---
 
