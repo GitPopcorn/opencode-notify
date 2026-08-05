@@ -233,6 +233,25 @@ const NETWORK_ERROR_HINTS = [
 ]
 
 /**
+ * Extract a readable message from a session.error value, which can be a string,
+ * an Error-like object ({name, data:{message}, message, ...}) or anything else.
+ * @param {unknown} error
+ * @returns {string | undefined}
+ */
+function extractErrorMessage(error) {
+	if (error === undefined || error === null) return undefined
+	if (typeof error === "string") return error
+	if (typeof error === "object") {
+		const record = error
+		const fromData = record?.data && typeof record.data === "object" ? record.data.message : undefined
+		const fromMsg = record?.message
+		const fromName = record?.name
+		return fromData ?? fromMsg ?? fromName ?? String(error)
+	}
+	return String(error)
+}
+
+/**
  * Classify a session.error message.
  * @param {string} rawError
  * @returns {"network-interruption"|"http-error"|"generic"}
@@ -281,10 +300,19 @@ async function isParentSession(client, sessionID) {
 	}
 }
 
-async function getSessionTitle(client, sessionID) {
+async function getSessionTitle(client, sessionID, info) {
+	// Prefer the session info carried on the event (cheapest, no round-trip).
+	try {
+		const eventTitle = info?.title ?? info?.slug
+		if (eventTitle) return String(eventTitle).slice(0, 50)
+	} catch {
+		// fall through
+	}
+	// Fallback: fetch the session.
 	try {
 		const session = await client.session.get({ path: { id: sessionID } })
-		return session?.data?.title ? String(session.data.title).slice(0, 50) : "Task"
+		const title = session?.data?.title ?? session?.data?.slug
+		return title ? String(title).slice(0, 50) : "Task"
 	} catch {
 		return "Task"
 	}
@@ -358,6 +386,7 @@ export function createNotifyPlugin(overrides = {}) {
 		const questionDedupe = createDedupe()
 		const readyDedupe = createDedupe()
 		const permissionDedupe = createDedupe()
+		const errorDedupe = createDedupe()
 
 		// Register a branded Start-Menu shortcut for the toast app icon (once).
 		try {
@@ -391,12 +420,12 @@ export function createNotifyPlugin(overrides = {}) {
 
 		// ---- handlers ----
 
-		const handleSessionIdle = async (sessionID) => {
+		const handleSessionIdle = async (sessionID, info) => {
 			if (!(await shouldNotifyParent(sessionID))) return
 			if (isQuietHours(config)) return
 
-			const title = await getSessionTitle(client, sessionID)
-			send({ title: "Ready for review", message: title, sound: config.sounds.idle })
+			const title = await getSessionTitle(client, sessionID, info)
+			send({ title: "READY FOR REVIEW", message: title, sound: config.sounds.idle })
 		}
 
 		const handleSessionError = async (sessionID, rawError) => {
@@ -409,20 +438,20 @@ export function createNotifyPlugin(overrides = {}) {
 			const message = rawError?.slice(0, 100) || "Something went wrong"
 			if (isNetwork) {
 				send({
-					title: "Network interrupted",
+					title: "NETWORK INTERRUPTED",
 					message,
 					sound: config.sounds.network,
 				})
 				beep(config.beepOnInterruption)
 			} else {
-				send({ title: "Something went wrong", message, sound: config.sounds.error })
+				send({ title: "SOMETHING WENT WRONG", message, sound: config.sounds.error })
 			}
 		}
 
 		const handlePermissionUpdated = async () => {
 			if (isQuietHours(config)) return
 			send({
-				title: "Waiting for you",
+				title: "WAITING FOR CONFIRMATION",
 				message: "OpenCode needs your input",
 				sound: config.sounds.permission,
 			})
@@ -431,7 +460,7 @@ export function createNotifyPlugin(overrides = {}) {
 		const handleQuestionAsked = async () => {
 			if (isQuietHours(config)) return
 			send({
-				title: "Question for you",
+				title: "QUESTION FOR YOU",
 				message: "OpenCode needs your input",
 				sound: config.sounds.question ?? config.sounds.permission,
 			})
@@ -453,18 +482,30 @@ export function createNotifyPlugin(overrides = {}) {
 				const props = event?.properties ?? {}
 
 				switch (type) {
-					case "session.status":
+					case "session.status": {
+						// session.status fires for BOTH busy and idle transitions.
+						// Only notify on the idle transition, never on busy.
+						const statusType = props?.status?.type
+						if (statusType !== "idle") break
+						const id = toId(props?.sessionID)
+						if (id && readyDedupe.shouldSend(`ready:${id}`)) {
+							await handleSessionIdle(id, props?.info)
+						}
+						break
+					}
 					case "session.idle": {
 						const id = toId(props?.sessionID)
 						if (id && readyDedupe.shouldSend(`ready:${id}`)) {
-							await handleSessionIdle(id)
+							await handleSessionIdle(id, props?.info)
 						}
 						break
 					}
 					case "session.error": {
 						const id = toId(props?.sessionID)
-						const raw = typeof props?.error === "string" ? props.error : props?.error ? String(props.error) : undefined
-						if (id) await handleSessionError(id, raw)
+						const raw = extractErrorMessage(props?.error)
+						if (id && errorDedupe.shouldSend(`error:${id}`)) {
+							await handleSessionError(id, raw)
+						}
 						break
 					}
 					case "permission.updated":

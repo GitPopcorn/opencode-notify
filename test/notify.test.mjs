@@ -100,7 +100,7 @@ async function main() {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "Ready for review")
+		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 		assert.equal(h.sent[0].message, "My Task")
 	})
 
@@ -123,7 +123,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: "boom" } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "Something went wrong")
+		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
 		assert.equal(h.sent[0].message, "boom")
 	})
 
@@ -133,7 +133,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "Network interrupted")
+		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 		assert.equal(h.beeps.length, 1)
 	})
 
@@ -175,7 +175,7 @@ async function main() {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "permission.updated", properties: { id: "p1" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "Waiting for you")
+		assert.equal(h.sent[0].title, "WAITING FOR CONFIRMATION")
 	})
 
 	await test("question.asked notifies", async () => {
@@ -184,7 +184,7 @@ async function main() {
 			event: { type: "question.asked", properties: { sessionID: "parent", tool: { callID: "c1" } } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "Question for you")
+		assert.equal(h.sent[0].title, "QUESTION FOR YOU")
 	})
 
 	await test("plugin loads without vendored deps (graceful warn, no crash)", async () => {
@@ -192,6 +192,49 @@ async function main() {
 		const factory = createNotifyPlugin({})
 		const instance = await factory({ client: makeSessionClient() })
 		assert.equal(typeof instance.event, "function")
+	})
+
+	console.log("busy/status/dedupe behaviors:")
+	await test("session.status busy does NOT notify", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.status", properties: { sessionID: "parent", status: { type: "busy" } } },
+		})
+		assert.equal(h.sent.length, 0)
+	})
+
+	await test("session.status idle DOES notify (deduped with session.idle)", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.status", properties: { sessionID: "parent", status: { type: "idle" }, info: { title: "My Task" } } },
+		})
+		await h.pluginDone.event({
+			event: { type: "session.idle", properties: { sessionID: "parent" } },
+		})
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].message, "My Task")
+	})
+
+	await test("session.error deduped within window", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		const ev = () =>
+			h.pluginDone.event({
+				event: { type: "session.error", properties: { sessionID: "parent", error: "boom" } },
+			})
+		await ev()
+		await ev()
+		assert.equal(h.sent.length, 1)
+	})
+
+	await test("session.error object extracts readable message", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: {
+				type: "session.error",
+				properties: { sessionID: "parent", error: { name: "UnknownError", data: { message: "Model not found: X." } } },
+			},
+		})
+		assert.equal(h.sent[0].message, "Model not found: X.")
 	})
 
 	console.log(`\n${passed} passed, ${failed} failed`)

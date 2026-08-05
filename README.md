@@ -55,11 +55,11 @@ The plugin loads standalone even if deps are missing, but logs a warning instead
 
 | Event | Notifies? | Title |
 |-------|-----------|-------|
-| Session complete (`session.idle`) | Yes | Ready for review |
-| Session error | Yes | Something went wrong |
-| Network / HTTP interruption | Yes | **Network interrupted** (+ system beep) |
-| Permission needed | Yes | Waiting for you |
-| Question asked | Yes | Question for you |
+| Session complete (`session.idle`) | Yes | READY FOR REVIEW |
+| Session error | Yes | SOMETHING WENT WRONG |
+| Network / HTTP interruption | Yes | **NETWORK INTERRUPTED** (+ system beep) |
+| Permission needed | Yes | WAITING FOR CONFIRMATION |
+| Question asked | Yes | QUESTION FOR YOU |
 | Sub-task events | No (default) | Set `notifyChildSessions: true` to include |
 
 Behavior: parent-session filtering (no sub-task spam), quiet-hours suppression, 1.5s dedupe windows, and terminal detection (for logging/context only — Windows has no focus suppression).
@@ -71,7 +71,7 @@ The original record asked whether the plugin can notify on **explicit** interrup
 - **Explicit** — OpenCode surfaces non-2xx status codes in `session.error`; the plugin classifies the status text.
 - **Implicit** — the plugin never issues requests or reads response bodies itself, so it cannot watch a body stream directly. But when a connection dies mid-stream, undici raises `ECONNRESET` / `socket hang up` / `EPIPE` / `aborted` / `fetch failed`, which OpenCode forwards as `session.error`. Because the plugin notifies on **every** parent `session.error` and classifies that text, both interruption kinds are covered.
 
-Classified errors use a distinct *Network interrupted* title and an optional system beep (config `beepOnInterruption`).
+Classified errors use a distinct *NETWORK INTERRUPTED* title and an optional system beep (config `beepOnInterruption`).
 
 > **Boundary:** if OpenCode itself goes fully silent (no `session.error` emitted at all), a pure plugin cannot know. This is a limit of the plugin model, not a bug.
 
