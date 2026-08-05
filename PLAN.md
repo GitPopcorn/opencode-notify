@@ -1,0 +1,95 @@
+# 改造计划：kdco/notify → Windows-only 零依赖 fork
+
+> 依据原始记录（`doc-04 PROMPT：@kdco/notify Windows Fork`）与仓库现状制定。
+> 目标：从「OCX facade 半成品源码」改造成「Windows 10/11 专用、零 OCX、手动 vendor 化」的可直接放进 `.opencode/plugins/` 的通知插件。
+
+---
+
+## 1. 现状诊断（已核实）
+
+| 检查项 | 结果 |
+|---|---|
+| 构建工具 | **无** `package.json` / `tsconfig.json` / `bun.lockb` / `opencode.json`（纯 facade 仓库） |
+| `src/notify.ts` 引用的 `./notify/status` | **不存在**（源码无法编译） |
+| `src/notify.ts` 引用的 `./notify/title` | **不存在**（源码无法编译） |
+| `src/kdco-primitives/cmux.ts` | **不存在**（`index.ts` / `notify/cmux.ts` 却 import 它） |
+| `src/plugin/kdco-primitives/` | 与 `src/kdco-primitives/` 重复，仅 `index.ts` 少 7 行（cmux 相关导出被删） |
+| `registry.json` | 引用不存在的 `src/kdco-notify.ts`（实际入口是 `src/notify.ts`） |
+
+**结论**：`main` 分支是一个「fork 了一半就中断」的残缺状态，连编译都过不了。本次改造正是把它收敛成可用的 Windows 插件。
+
+---
+
+## 2. 目标形态
+
+- **平台**：Windows 10/11 仅限。
+- **安装**：手动把产物目录拷入 `.opencode/plugins/`，无需 OCX。
+- **通知引擎**：`node-notifier` → SnoreToast（Windows Toast）。
+- **交付物**：单文件 ESM 插件 `kdco-notify-win.js` + `package.json`（仅 `node-notifier`、`detect-terminal` 两个 runtime 依赖，离线可 `npm install` vendor 进 `node_modules`）。
+- **保留能力**：任务完成 / 出错 / 权限请求 / 提问 Toast；静默时段；父会话过滤；1.5s 去重；终端检测。
+- **裁剪内容**：全部 cmux、macOS alerter / 焦点检测 / osascript、Linux notify-send、`@opencode-ai/plugin`/`@opencode-ai/sdk` 类型依赖、以及其他未使用的 `kdco-primitives`（mutex/shell/temp/get-project-id/with-timeout）。
+
+---
+
+## 3. 新增核心能力：网络中断通知
+
+原始记录末尾的关键问题——**插件能否在「明确中断（503/401/500 等）」与「隐式中断（响应到一半断开 / ECONNRESET）」时通知？**
+
+结论与实现方式：
+
+- **明确中断**：OpenCode 收到非 2xx 状态码时会把错误灌入 `session.error`。插件对 error 文本做分类，识别 `503/401/500/429/403` 等状态码。
+- **隐式中断**：插件本身不发起请求、不消费响应体，无法直接监听 body 流；但 undici fetch 在中途断开时会把 `ECONNRESET / socket hang up / EPIPE / aborted / fetch failed` 等错误抛给调用方，同样会以 `session.error` 形式出现。因此**只要保证「任何 session.error（含网络中断特征）都触发通知」，两类中断就都能被覆盖**。
+- 实现：新增 `classifyError()`，把错误分为 `network-interruption`（隐式）/ `http-error`（明确）/ `generic` 三类；网络/HTTP 错误用独立标题（如 *Network interrupted*）+ 独立声音通知，并保证父会话错误**必定**通知（不受终端焦点等条件误伤）。
+
+> 边界说明：若 OpenCode 本身因断网而完全不产生任何事件（连 `session.error` 都不发），纯插件无法感知。这是插件模型的上限，已在实现注释中标注。
+
+---
+
+## 4. 目录结构（改造后）
+
+```
+opencode-notify/
+├── README.md                 # 改写为 Windows fork 说明
+├── PLAN.md                   # 本文档
+├── LICENSE
+├── dist/                     # 交付物（可直接 vendor 进 .opencode/plugins/）
+│   └── kdco-notify-win/
+│       ├── package.json         # deps: node-notifier, detect-terminal
+│       ├── kdco-notify-win.js   # 单文件插件（唯一源码 + 交付物）
+│       └── node_modules/        # npm install 生成（离线 vendor）
+└── test/
+    ├── notify.test.mjs         # 自测（注入假 notifier，无需真实二进制）
+    └── demo.mjs                # demo：装入真实 node-notifier 弹一次 Toast
+```
+
+> 说明：`dist/kdco-notify-win/kdco-notify-win.js` 作为**唯一源码与交付物**（Bun 可直接跑 ESM JS，无需任何 TS 工具链）。所有能力、误差分类逻辑、配置均内联于此，避免 TS/JS 双份漂移。维护时直接改此文件。
+
+---
+
+## 5. 分步实施
+
+1. **建分支**：`git checkout -b dev`（已完成）。
+2. **清理**：删除 `src/plugin/`、`registry.json`（OCX 专属）、旧 `src/notify.ts`、`src/notify/`、`src/kdco-primitives/`（全部为残缺/OCX 依赖）。
+3. **实现**：编写 `dist/kdco-notify-win/kdco-notify-win.js`（含 `classifyError` 网络中断分类 + 保留全部原有通知逻辑）。
+4. **vendor**：`dist/kdco-notify-win/package.json` 声明依赖，提供 `npm install` 命令生成 `node_modules`。
+5. **自测**：`test/notify.test.mjs` 用注入假 `notifier`/`detectTerminal`/`client` 驱动插件，覆盖：idle 完成通知、error 通知、网络中断分类、父会话过滤、静默时段、去重、提问通知。
+6. **验收**：对照下文清单逐项确认。
+
+---
+
+## 6. 自测与验收清单
+
+- [ ] `main` 分支已知残缺，`dev` 分支产物可被 Node/Bun 直接 import 且无编译错误。
+- [ ] 自测脚本全部通过（完成 / 出错 / 网络中断 / 父会话 / 静默 / 去重 / 提问）。
+- [ ] demo 脚本可驱动一次真实 `node-notifier`（若本机装了依赖）弹出 Toast。
+- [ ] 产物不含任何 cmux / macOS / Linux 引用（`grep -i cmux|darwin|osascript|notify-send` 为空）。
+- [ ] 依赖收敛为 `node-notifier` + `detect-terminal` 两个。
+- [ ] README 已更新为 Windows fork 说明与安装/配置。
+
+---
+
+## 7. 参考文档
+
+- `E:\vscode-workspace-temp\docs\dev\opencode-notify\2026-07-28-04-PROMPT：@kdco／notify Windows Fork — 项目规约与实现指引.md`
+- `2026-07-28-01 / 02 / 05`（QQ 通知方案、通知套件搭建指南）
+- `2026-07-28-03`（原始会话导出，任务完成提示配置）

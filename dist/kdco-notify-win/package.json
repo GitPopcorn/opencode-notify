@@ -1,0 +1,15 @@
+{
+  "name": "kdco-notify-win",
+  "version": "1.0.0",
+  "description": "Windows-only native notifications for OpenCode (fork of @kdco/notify, zero OCX, manual vendored)",
+  "type": "module",
+  "main": "kdco-notify-win.js",
+  "private": true,
+  "dependencies": {
+    "node-notifier": "^10.0.1",
+    "detect-terminal": "^1.0.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
