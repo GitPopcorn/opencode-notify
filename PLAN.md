@@ -280,10 +280,24 @@ opencode-notify/
 - [x] 本处修复体现到 README。
 - 现场待二次确认：重启后实际双击 ESC，应只出 STOPPED BY YOU（或静默），日志出现 `L2003 ...ms after user-cancel suppressed`。
 
-### 13.3 配置命名收敛（`kdco-notify-win.jsonc` + 全局 JSONC）
+### 13.3 真实根因（现场日志 L2001/L2002）+ 分类展开
+
+- **真实 payload（用户实际双击 ESC）**：`{"name":"MessageAbortedError","data":{"message":"Aborted"}}` → 之前 `name.includes("aborterror")` 太窄：`MessageAbortedError`=「aborted」+「error」，**不含**「aborterror」（中间多一个 `d`），于是落到 `classifyError("aborted")`，而 `NETWORK_ERROR_HINTS` 含 `"aborted"` → 判 **network → NETWORK INTERRUPTED**。
+- **修复**：`if (name.includes("aborterror"))` → `if (name.includes("abort"))`（同一 `explicitNetwork` 守卫：正文含真实连接特征仍判 network）。覆盖 `AbortError` / `MessageAbortedError` / `abortederror` / `useraborted` 等。
+- 现场确认：`L2011 idle suppressed (run token already claimed)` —— READY 抑制在真实场景已生效（双击 ESC 不再重复 READY）。
+- `L2003`（取消后 5s 网络连带抑制）保留作双保险；本次真正修复是上面的分类展开。
+
+### 13.4 配置命名收敛（`kdco-notify-win.jsonc` + 全局 JSONC）
 
 - 用户要求：项目级配置文件命名统一为 **`kdco-notify-win.jsonc`**（与插件同名，避免与其他工具的 `kdco-notify.json` 混淆），全局配置也换成 **JSONC** 以支持注释。
 - `resolveConfigPath` 候选顺序改为：项目 `kdco-notify-win.jsonc` → `.json` → 旧名 `kdco-notify.jsonc`/`.json`（legacy 兼容）→ 全局 `kdco-notify-win.jsonc` → `.json` → 旧名。
 - 仓库范例 `kdco-notify.jsonc` 重命名为 `.opencode/plugin/config/kdco-notify-win.jsonc`；`deploy.ps1` 改拷新名、写入目标时移除旧名 `kdco-notify.jsonc/.json` 残留（防旧配置遮蔽）。
 - 全局：新建 `~/.config/opencode/kdco-notify-win.jsonc`（完整注释模板，承继原 `{"iconTheme":"legacy"}`，`logging.enabled:false` 避免全局刷盘），并删除旧 `~/.config/opencode/kdco-notify.json`。
 - 验证：两处部署逐字节一致；`E:\vscode-workspace-temp` 下 `resolveConfigPath()` 正确返回项目 `kdco-notify-win.jsonc`；两个 jsonc 均能过 `parseJsonc`；notify 81 / logger 12 全绿。
+
+### 13.5 双击 ESC 修复落地（2026-08-06）
+
+- [x] `categorizeErrorEvent` 展开 `name.includes("abort")`（13.3 根因）。
+- [x] `node test/notify.test.mjs` **83 passed**（+2：真实 `MessageAbortedError` payload → user-cancel、带真实连接特征的 `MessageAbortedError` → network）；logger 12 passed。
+- [x] 部署两处 + 逐字节校验。
+- 现场复测：重启后双击 ESC → 只弹 STOPPED BY YOU（或静默），日志应见 `L2002 categorized=user-cancel name=messageabortederror`。

@@ -193,6 +193,18 @@ async function main() {
 	await test("categorize network message -> network", () => {
 		assert.equal(categorizeErrorEvent("fetch failed: read ECONNRESET"), "network-interruption")
 	})
+	await test("categorize real ESC payload MessageAbortedError -> user-cancel", () => {
+		// The actual payload observed in the field on double-ESC. Its name is
+		// "aborted"+"error", so broaden the abort-name match to catch it instead
+		// of letting the "aborted" text hint misfire as a network drop.
+		assert.equal(categorizeErrorEvent({ name: "MessageAbortedError", data: { message: "Aborted" } }), "user-cancel")
+		assert.equal(categorizeErrorEvent({ name: "abortederror", message: "aborted" }), "user-cancel")
+	})
+	await test("MessageAbortedError with a real connection signature still -> network", () => {
+		// The explicitNetwork guard must survive: if the removed request's text
+		// actually names a connection failure, it stays a network interruption.
+		assert.equal(categorizeErrorEvent({ name: "MessageAbortedError", message: "fetch failed: read ECONNRESET" }), "network-interruption")
+	})
 	await test("categorize generic -> generic", () => {
 		assert.equal(categorizeErrorEvent({ name: "Error", message: "division by zero" }), "generic")
 		assert.equal(categorizeErrorEvent(undefined), "generic")

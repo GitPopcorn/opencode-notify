@@ -943,9 +943,13 @@ export function categorizeErrorEvent(error) {
 	// Message that names the user as the abort source.
 	if (USER_ABORT_MESSAGE_HINTS.some((hint) => text.includes(hint))) return "user-cancel"
 
-	// A bare AbortError ("This operation was aborted") is the classic manual
-	// interrupt. Genuine network aborts still carry a connection signature.
-	if (name.includes("aborterror")) {
+	// A bare AbortError-ish name ("AbortError", "MessageAbortedError",
+	// "abortederror", "useraborted", ...) is the classic manual interrupt.
+	// Genuine network aborts still carry a connection signature, so keep the
+	// "aborted" text hint out of the network bucket here. (Prefix match on
+	// "abort" rather than "aborterror" so names like
+	// `MessageAbortedError` = "aborted" + "error" are caught too.)
+	if (name.includes("abort")) {
 		const explicitNetwork = NETWORK_ERROR_HINTS.some((hint) => hint !== "aborted" && text.includes(hint))
 		return explicitNetwork ? "network-interruption" : "user-cancel"
 	}
