@@ -11,7 +11,18 @@ import assert from "node:assert"
 import * as os from "node:os"
 import * as path from "node:path"
 import * as fs from "node:fs"
-import { createNotifyPlugin, classifyError, formatTimestamp, buildStepSummary, sendWindowsToast, buildSnoreToastArgs } from "../dist/kdco-notify-win/kdco-notify-win.js"
+import * as net from "node:net"
+import {
+	createNotifyPlugin,
+	classifyError,
+	formatTimestamp,
+	buildStepSummary,
+	getLastRunOutcome,
+	sendWindowsToast,
+	buildSnoreToastArgs,
+	parseActivationPayload,
+	substitutePlaceholders,
+} from "../dist/kdco-notify-win/kdco-notify-win.js"
 
 let passed = 0
 let failed = 0
@@ -61,12 +72,13 @@ function makeSessionClient(parentID) {
 	}
 }
 
-async function makeHarness({ client, config, platform = "win32", clock = null, dedupeStorePath = null }) {
+async function makeHarness({ client, config, platform = "win32", clock = null, dedupeStorePath = null, now = null }) {
 	const sent = []
 	const beeps = []
 	const notifierImpl = (opts) => sent.push(opts)
 	const readConfig = async () => config
 	let nowMs = clock ?? Date.now()
+	const clockFn = now ?? (() => nowMs)
 
 	const pluginFactory = createNotifyPlugin({
 		platform,
@@ -76,6 +88,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null, d
 		beep: (flag) => {
 			if (flag) beeps.push(1)
 		},
+		now: clockFn,
 		dedupeStorePath: dedupeStorePath ?? path.join(os.tmpdir(), `kdco-notify-test-${Math.random().toString(36).slice(2)}.json`),
 	})
 
@@ -84,7 +97,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null, d
 		pluginDone,
 		sent,
 		beeps,
-		// deterministic clock for quiet-hours tests
+		// deterministic clock for quiet-hours / heartbeat tests
 		setNow: (ms) => {
 			nowMs = ms
 		},
@@ -93,7 +106,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null, d
 
 const baseConfig = () => ({
 	notifyChildSessions: false,
-	sounds: { idle: "Glass", error: "Basso", permission: "Submarine", question: "Submarine", network: "Basso" },
+	sounds: { idle: "Glass", error: "Basso", permission: "Submarine", question: "Submarine", network: "Basso", cancelled: "Basso" },
 	quietHours: { enabled: false, start: "22:00", end: "08:00" },
 	beepOnInterruption: true,
 	showTimestamp: true,
@@ -101,8 +114,11 @@ const baseConfig = () => ({
 	summarySteps: 3,
 	themedIcons: true,
 	soundOverride: "",
+	clickMode: "off",
 	clickProgram: "",
 	clickArgs: [],
+	notifyCancelled: true,
+	heartbeat: { enabled: false, intervalSec: 30, stallSec: 120, warnWhileStalled: false },
 })
 
 async function main() {
@@ -345,7 +361,7 @@ async function main() {
 	})
 
 	await test("clickProgram is passed through as clickProgram", async () => {
-		const cfg = { ...baseConfig(), clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] }
+		const cfg = { ...baseConfig(), clickMode: "simple", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].clickProgram, "wt.exe")
@@ -356,6 +372,231 @@ async function main() {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].sound, "Glass")
+	})
+
+	console.log("run-outcome classification (state-driven READY/error/cancel):")
+	await test("getLastRunOutcome -> error when final part carries state.error", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "FetchError", message: "503" } } }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "error")
+	})
+
+	await test("getLastRunOutcome -> aborted on AbortError", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "AbortError", message: "user interrupt" } } }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
+	})
+
+	await test("getLastRunOutcome -> aborted on status aborted", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { status: "aborted" } }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
+	})
+
+	await test("getLastRunOutcome -> complete on clean final part", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
+	})
+
+	await test("idle after error is suppressed even beyond the 1.5s window (state-driven)", async () => {
+		const errorClient = {
+			session: {
+				get: async ({ path: { id } }) => ({ data: { title: "My Task", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "FetchError", message: "fetch failed: read ECONNRESET" } } }] },
+				],
+			},
+		}
+		const h = await makeHarness({ client: errorClient, config: baseConfig() })
+		// Error first (network toast), then idle arrives LONG after the dedupe
+		// window would have expired. The state-based check must still suppress READY.
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1, "only the network toast, no READY")
+		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+	})
+
+	await test("ESC/user-stop idle sends STOPPED BY YOU with cancelled theme", async () => {
+		const abortClient = {
+			session: {
+				get: async ({ path: { id } }) => ({ data: { title: "My Task", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "AbortError", message: "user interrupt" } } }] },
+				],
+			},
+		}
+		const h = await makeHarness({ client: abortClient, config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].theme, "cancelled")
+	})
+
+	await test("notifyCancelled:false falls back to READY", async () => {
+		const abortClient = {
+			session: {
+				get: async ({ path: { id } }) => ({ data: { title: "My Task", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "AbortError", message: "user interrupt" } } }] },
+				],
+			},
+		}
+		const cfg = { ...baseConfig(), notifyCancelled: false }
+		const h = await makeHarness({ client: abortClient, config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "READY FOR REVIEW")
+	})
+
+	console.log("heartbeat watchdog:")
+	await test("heartbeat backfills SESSION ENDED for a silently-ended session", async () => {
+		let clock = 1_000_000
+		const statusClient = {
+			session: {
+				get: async ({ path: { id } }) => ({ data: { title: "My Task", parentID: null, status: { type: "idle" } } }),
+				messages: async () => [],
+			},
+		}
+		const cfg = { ...baseConfig(), heartbeat: { enabled: true, intervalSec: 30, stallSec: 1, warnWhileStalled: false } }
+		const h = await makeHarness({ client: statusClient, config: cfg, now: () => clock })
+		await h.pluginDone.event({ event: { type: "session.status", properties: { sessionID: "parent", status: { type: "busy" } } } })
+		clock += 5000 // way past stallSec with zero activity
+		await h.pluginDone.heartbeatTick()
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "SESSION ENDED")
+		await h.pluginDone.heartbeatTick()
+		assert.equal(h.sent.length, 1, "no duplicate backfill")
+	})
+
+	await test("heartbeat does NOT backfill when the session is still running", async () => {
+		let clock = 1_000_000
+		const statusClient = {
+			session: {
+				get: async () => ({ data: { title: "My Task", parentID: null, status: { type: "running" } } }),
+				messages: async () => [],
+			},
+		}
+		const cfg = { ...baseConfig(), heartbeat: { enabled: true, intervalSec: 30, stallSec: 1, warnWhileStalled: false } }
+		const h = await makeHarness({ client: statusClient, config: cfg, now: () => clock })
+		await h.pluginDone.event({ event: { type: "session.status", properties: { sessionID: "parent", status: { type: "busy" } } } })
+		clock += 5000
+		await h.pluginDone.heartbeatTick()
+		assert.equal(h.sent.length, 0)
+	})
+
+	await test("heartbeat SESSION STALLED warn fires only when warnWhileStalled", async () => {
+		let clock = 1_000_000
+		const statusClient = {
+			session: {
+				get: async () => ({ data: { title: "My Task", parentID: null, status: { type: "running" } } }),
+				messages: async () => [],
+			},
+		}
+		const cfg = { ...baseConfig(), heartbeat: { enabled: true, intervalSec: 30, stallSec: 1, warnWhileStalled: true } }
+		const h = await makeHarness({ client: statusClient, config: cfg, now: () => clock })
+		await h.pluginDone.event({ event: { type: "session.status", properties: { sessionID: "parent", status: { type: "busy" } } } })
+		clock += 5000
+		await h.pluginDone.heartbeatTick()
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "SESSION STALLED")
+	})
+
+	await test("heartbeat does NOT backfill a run another instance already reported", async () => {
+		let clock = 1_000_000
+		const makeStatusClient = () => ({
+			session: {
+				get: async () => ({ data: { title: "My Task", parentID: null, status: { type: "idle" }, time: { updated: 5000 } } }),
+				messages: async () => [],
+			},
+		})
+		const sharedPath = path.join(os.tmpdir(), `kdco-notify-hb-${Math.random().toString(36).slice(2)}.json`)
+		const cfg = { ...baseConfig(), heartbeat: { enabled: false, intervalSec: 30, stallSec: 1, warnWhileStalled: false } }
+		const a = await makeHarness({ client: makeStatusClient(), config: cfg, now: () => clock, dedupeStorePath: sharedPath })
+		const b = await makeHarness({ client: makeStatusClient(), config: cfg, now: () => clock, dedupeStorePath: sharedPath })
+		// A reports READY for this run, which claims hb:<id>:<updated> in the
+		// shared store. B never processed that idle (deduped) but still tracks the
+		// session as active.
+		await a.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		await b.pluginDone.event({ event: { type: "session.status", properties: { sessionID: "parent", status: { type: "busy" } } } })
+		clock += 5000
+		await b.pluginDone.heartbeatTick()
+		assert.equal(b.sent.length, 0, "B must not backfill a run A already reported as READY")
+		fs.rmSync(sharedPath, { force: true })
+	})
+
+	console.log("click-to-open (activation pipe + placeholders):")
+	await test("parseActivationPayload recognizes utf16/utf8 activation text", async () => {
+		assert.equal(parseActivationPayload("action=activate"), "activate")
+		assert.equal(parseActivationPayload("action=clicked"), "activate")
+		assert.equal(parseActivationPayload("action=timedout"), null)
+		assert.equal(parseActivationPayload(""), null)
+		assert.equal(parseActivationPayload("no tokens here"), null)
+	})
+
+	await test("substitutePlaceholders replaces title/cwd/sessionID", async () => {
+		assert.equal(substitutePlaceholders("-t {{title}} -d {{cwd}} -s {{sessionID}}", { title: "My Task", cwd: "E:\\proj", sessionID: "abc" }),
+			"-t My Task -d E:\\proj -s abc")
+		assert.equal(substitutePlaceholders("{{title}}", {}), "")
+	})
+
+	await test("sendWindowsToast activation callback spawns clickProgram", async () => {
+		const spawned = []
+		const childHandlers = {}
+		const fakeChild = {
+			unref: () => {},
+			on: (ev, fn) => { childHandlers[ev] = fn },
+		}
+		const spawn = (cmd, args) => {
+			spawned.push({ cmd, args })
+			return fakeChild
+		}
+		sendWindowsToast(
+			{ title: "T", message: "M", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] },
+			{ platform: "win32", snoreToastExe: "C:\\snoretoast.exe", spawn },
+		)
+		await new Promise((r) => setTimeout(r, 80))
+		const snore = spawned[0]
+		const pipePath = snore.args[snore.args.indexOf("-pipeName") + 1]
+		// Simulate the user clicking the toast: SnoreToast writes utf16le activation.
+		await new Promise((resolve) => {
+			const sock = net.connect(pipePath, () => {
+				sock.write(Buffer.from("action=activate", "utf16le"))
+				sock.end()
+			})
+			sock.on("error", () => resolve())
+			setTimeout(resolve, 120)
+		})
+		await new Promise((r) => setTimeout(r, 100))
+		assert.ok(spawned.length >= 2, "click should spawn the click program")
+		assert.equal(spawned[1].cmd, "wt.exe")
+		// Close the pipe server promptly by firing the child exit handler.
+		if (childHandlers.exit) childHandlers.exit(0)
+		await new Promise((r) => setTimeout(r, 20))
 	})
 
 	console.log("self-hosted SnoreToast sender:")

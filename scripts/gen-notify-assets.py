@@ -13,12 +13,14 @@ BW, BH = 620, 180
 #   network:    red            (connection interrupted)
 #   permission: yellow         (waiting on user / authorization)
 #   question:   blue           (question asked)
+#   cancelled:  grey           (user stopped the run / ESC)
 themes = {
     "ready":      ((18, 70, 45),   (40, 140, 90),  (72, 226, 144), "Task completed",        "READY FOR REVIEW"),
     "error":      ((70, 45, 18),   (150, 95, 30),  (240, 150, 55), "Something went wrong",   "SOMETHING WENT WRONG"),
     "network":    ((72, 28, 22),   (160, 60, 48),  (255, 110, 92), "Connection interrupted", "NETWORK INTERRUPTED"),
     "permission": ((70, 60, 16),   (150, 128, 34), (245, 210, 65), "Waiting on you",         "WAITING FOR CONFIRMATION"),
     "question":   ((20, 48, 74),   (40, 100, 150), (84, 180, 250), "A question was asked",   "QUESTION FOR YOU"),
+    "cancelled":  ((52, 56, 62),   (104, 110, 118), (176, 184, 192), "Stopped",              "STOPPED BY YOU"),
 }
 
 try:

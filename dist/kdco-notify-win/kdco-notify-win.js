@@ -104,6 +104,7 @@ const THEMED_BANNERS = {
 	network: path.join(ASSETS_DIR, "opencode-notify-banner-network.png"),
 	permission: path.join(ASSETS_DIR, "opencode-notify-banner-permission.png"),
 	question: path.join(ASSETS_DIR, "opencode-notify-banner-question.png"),
+	cancelled: path.join(ASSETS_DIR, "opencode-notify-banner-cancelled.png"),
 }
 
 // Resolve the banner + shortcut-icon paths for a given icon theme. `iconTheme`
@@ -113,7 +114,7 @@ function resolveIconTheme(iconTheme) {
 	const t = ICON_THEMES[iconTheme] ? iconTheme : "flat"
 	const base = ICON_THEMES[t].bannerBase
 	const themedBanners = {}
-	for (const kind of ["ready", "error", "network", "permission", "question"]) {
+	for (const kind of ["ready", "error", "network", "permission", "question", "cancelled"]) {
 		themedBanners[kind] = `${base}-${kind}.png`
 	}
 	return {
@@ -263,18 +264,127 @@ function resolveSnoreToastExe() {
  * @param {object} overrides - test overrides: {platform?, snoreToastExe?, bannerPath?, fsApi?, spawn?}
  * @returns {boolean} whether the SnoreToast process was spawned
 */
+/**
+ * Launch the click-to-open program once the toast is activated.
+ *
+ * `clickTarget` = { program, args } resolved from config + per-notification
+ * context. `fallbackTarget` (optional) is the "simple open wt.exe" plan used
+ * when the primary helper fails (spawn throw or non-zero exit), so a broken /
+ * missing helper script degrades gracefully instead of doing nothing.
+ * @param {{program:string,args:string[]}} clickTarget
+ * @param {{program:string,args:string[]}|null} fallbackTarget
+ * @param {object} overrides
+ * @returns {boolean}
+ */
+function spawnClick(clickTarget, fallbackTarget, overrides = {}) {
+	if (!clickTarget?.program) return false
+	const spawnFn = overrides.clickSpawn ?? overrides.spawn ?? defaultSpawn
+	const launch = (t) => {
+		try {
+			const child = spawnFn(t.program, t.args, { stdio: "ignore", windowsHide: true, detached: true })
+			if (typeof child?.unref === "function") child.unref()
+			return child
+		} catch {
+			return null
+		}
+	}
+	let child
+	try {
+		child = launch(clickTarget)
+	} catch {
+		child = null
+	}
+	if (child) {
+		// If the primary (helper) exits non-zero, fall back to the simple plan.
+		if (fallbackTarget?.program && typeof child.on === "function") {
+			child.once("exit", (code) => {
+				if (code !== 0) launch(fallbackTarget)
+			})
+		}
+		return true
+	}
+	if (fallbackTarget?.program) {
+		return !!launch(fallbackTarget)
+	}
+	return false
+}
+
+/**
+ * Parse the activation payload SnoreToast writes to our named pipe on click.
+ * SnoreToast's exact encoding is not guaranteed (UTF-16LE vs UTF-8), so the
+ * caller tries both decodings; this only tests the text for the activation
+ * token. Returns "activate" on hit, else null.
+ * @param {string} text
+ * @returns {"activate"|null}
+ */
+export function parseActivationPayload(text) {
+	if (!text) return null
+	if (/(^|[;&=\s])(activate|clicked)([;&\s]|$)/i.test(String(text))) return "activate"
+	return null
+}
+
+/** Resolve { program, args } from a notification's click options. */
+function resolveClickTarget(opts) {
+	const program = opts?.clickProgram
+	if (!program) return null
+	const args = Array.isArray(opts?.clickArgs) ? opts.clickArgs.map(String) : []
+	return { program, args }
+}
+
+function resolveFallbackTarget(opts) {
+	const program = opts?.clickFallbackProgram
+	if (!program) return null
+	const args = Array.isArray(opts?.clickFallbackArgs) ? opts.clickFallbackArgs.map(String) : []
+	return { program, args }
+}
+
+/**
+ * Close the named pipe server after the toast's SnoreToast process exits, with
+ * a hard cap so a hung process can't leak the handle forever. Test fakes that
+ * don't implement `child.on` fall back to the cap.
+ */
+function releasePipeAfter(child, server, maxMs) {
+	const close = () => {
+		try { server.close() } catch {}
+	}
+	let timer = null
+	const onExit = () => {
+		if (timer) clearTimeout(timer)
+		close()
+	}
+	if (child && typeof child.on === "function") {
+		child.on("exit", onExit)
+	}
+	timer = setTimeout(close, maxMs)
+}
+
 export function sendWindowsToast(opts, overrides = {}) {
 	if ((overrides.platform ?? process.platform) !== "win32") return false
 	const exe = overrides.snoreToastExe ?? resolveSnoreToastExe()
 	if (!exe) return false
 	const spawnFn = overrides.spawn ?? defaultSpawn
 	const banner = resolveBannerPath(opts, overrides)
+	const clickTarget = resolveClickTarget(opts)
+	// Only when click-to-open is configured do we need the pipe to stay alive to
+	// receive the activation callback. Without it we behave exactly as before.
+	const keepOpenForClick = !!clickTarget
 
 	// Unique named pipe, mirroring node-notifier's getPipeName() + createNamedPipe().
 	const pipePath = `\\\\.\\pipe\\notifierPipe-${randomUUID()}`
 	let server = null
 	try {
-		server = net.createServer(() => {})
+		server = net.createServer((conn) => {
+			const chunks = []
+			conn.on("data", (d) => chunks.push(d))
+			conn.on("end", () => {
+				if (!clickTarget) return
+				const buf = Buffer.concat(chunks)
+				const activated =
+					parseActivationPayload(buf.toString("utf16le")) ||
+					parseActivationPayload(buf.toString("utf8"))
+				if (activated) spawnClick(clickTarget, resolveFallbackTarget(opts), overrides)
+			})
+		})
 		server.on("error", () => {})
 	} catch {
 		server = null
@@ -287,32 +397,53 @@ export function sendWindowsToast(opts, overrides = {}) {
 			// resident until the toast is clicked/times out). Waiting on 'exit'
 			// would block for many seconds, so we never do.
 			const child = spawnFn(exe, args, { stdio: "ignore", windowsHide: true, detached: true })
-			child.unref()
-			return true
+			if (typeof child?.unref === "function") child.unref()
+			return child
 		} catch {
-			return false
+			return null
 		}
 	}
 
-	if (!server) return doSpawn()
+	if (!server) {
+		doSpawn()
+		return true
+	}
 
 	try {
 		// Listen first (like node-notifier), then spawn once the pipe accepts
 		// connections so SnoreToast can write its activation callback back.
 		server.listen(pipePath, () => {
-			const ok = doSpawn()
-			// Release the pipe handle shortly after; SnoreToast keeps the name
-			// open only during its own lifetime.
-			setTimeout(() => {
-				try { server.close() } catch {}
-			}, 1500)
-			return ok
+			const child = doSpawn()
+			if (keepOpenForClick) {
+				// Keep the callback channel alive for the toast's lifetime so a
+				// click (which can happen many seconds later) still reaches us.
+				releasePipeAfter(child, server, 30000)
+			} else {
+				// No click target: release shortly after, exactly like before.
+				setTimeout(() => {
+					try { server.close() } catch {}
+				}, 1500)
+			}
+			return !!child
 		})
 		return true
 	} catch {
 		try { server.close() } catch {}
-		return doSpawn()
+		doSpawn()
+		return true
 	}
+}
+
+/**
+ * Replace {{title}} / {{cwd}} / {{sessionID}} placeholders in a string with the
+ * notification's session context. Used to build per-notification click targets.
+ */
+export function substitutePlaceholders(value, ctx = {}) {
+	if (typeof value !== "string") return value
+	return value
+		.replace(/\{\{title\}\}/g, ctx.title ?? "")
+		.replace(/\{\{cwd\}\}/g, ctx.cwd ?? "")
+		.replace(/\{\{sessionID\}\}/g, ctx.sessionID ?? "")
 }
 
 /**
@@ -402,6 +533,7 @@ const DEFAULT_CONFIG = {
 		permission: "Notification.SMS",
 		question: "Notification.IM",
 		network: "Notification.Mail",
+		cancelled: "Notification.Mail",
 	},
 	quietHours: {
 		enabled: false,
@@ -436,10 +568,42 @@ const DEFAULT_CONFIG = {
 	 * keep the per-kind defaults from `sounds`.
 	 */
 	soundOverride: "",
-	/** Launch this program when the user clicks a notification (click-to-open). Empty = disabled. */
+	/**
+	 * What to launch when a notification is clicked (click-to-open):
+	 *   "helper" -> run scripts/jump-to-opencode.ps1 (focus an existing Windows
+	 *               Terminal window, else open opencode in a fresh tab). Falls
+	 *               back to the "simple" plan if the helper is missing/fails.
+	 *   "simple" -> plain `wt.exe -d <cwd> opencode` (or your clickProgram/args).
+	 *   "off"    -> clicking does nothing.
+	 * An explicit `clickProgram` still always wins over these modes (keeps the
+	 * original documented custom-program feature working).
+	 */
+	clickMode: "helper",
+	/** Launch this program when the user clicks a notification (click-to-open). Empty = use clickMode default. */
 	clickProgram: "",
-	/** Extra args appended when launching `clickProgram`. */
+	/** Extra args appended when launching `clickProgram`. Supports {{title}}/{{cwd}}/{{sessionID}}. */
 	clickArgs: [],
+	/**
+	 * When the user presses ESC / stops a run, OpenCode takes the session idle
+	 * without an error. Instead of announcing READY FOR REVIEW, send a distinct
+	 * "STOPPED BY YOU" notification (own title + banner). false disables it.
+	 */
+	notifyCancelled: true,
+	/**
+	 * Watchdog for runs that end without ANY event reaching the plugin (a silent
+	 * stream death where OpenCode never emits session.error/session.idle). While
+	 * the session was recently active but then went quiet past `stallSec`, poll
+	 * the session's real state; if it is terminal but was never notified, send a
+	 * backfill "SESSION ENDED" toast. Pure plugin-event logic cannot see this
+	 * gap; the heartbeat closes it.
+	 */
+	heartbeat: {
+		enabled: true,
+		intervalSec: 30,
+		stallSec: 120,
+		/** Also warn (STALLED) while the session is STILL running but idle-past-stall. Off by default to avoid false positives on long thinking. */
+		warnWhileStalled: false,
+	},
 }
 
 const CONFIG_PATH = () => path.join(os.homedir(), ".config", "opencode", "kdco-notify.json")
@@ -457,6 +621,7 @@ async function loadConfig() {
 			...userConfig,
 			sounds: { ...DEFAULT_CONFIG.sounds, ...userConfig.sounds },
 			quietHours: { ...DEFAULT_CONFIG.quietHours, ...userConfig.quietHours },
+			heartbeat: { ...DEFAULT_CONFIG.heartbeat, ...userConfig.heartbeat },
 		}
 	} catch {
 		// Missing or invalid config -> defaults
@@ -562,6 +727,21 @@ export function classifyError(rawError) {
 	return "generic"
 }
 
+/**
+ * Error names OpenCode attaches to the final assistant part when the USER (or
+ * the runtime) stops a run, as opposed to a genuine failure. These map an idle
+ * session to the "cancelled" category instead of READY FOR REVIEW.
+ */
+const ABORT_ERROR_NAMES = [
+	"aborterror",
+	"userinterrupt",
+	"stop",
+	"stoperror",
+	"cancellederror",
+	"interrupted",
+	"error.interrupt",
+]
+
 /** Play a short system beep via PowerShell (best-effort, Windows). */
 function playInterruptionBeep(beep = true) {
 	if (!beep || process.platform !== "win32") return
@@ -592,21 +772,36 @@ async function isParentSession(client, sessionID) {
 	}
 }
 
-async function getSessionTitle(client, sessionID, info) {
-	// Prefer the session info carried on the event (cheapest, no round-trip).
+/**
+ * Resolve { title, cwd } for a session, preferring the info carried on the
+ * event (cheapest) and falling back to a session fetch. cwd feeds the click-to-
+ * open targets ({{cwd}} placeholder).
+ */
+async function getSessionContext(client, sessionID, info) {
 	try {
 		const eventTitle = info?.title ?? info?.slug
-		if (eventTitle) return String(eventTitle).slice(0, 50)
+		if (eventTitle) {
+			return {
+				title: String(eventTitle).slice(0, 50),
+				cwd: info?.cwd ?? info?.directory ? String(info?.cwd ?? info?.directory) : undefined,
+				updated: info?.time?.updated ?? undefined,
+			}
+		}
 	} catch {
 		// fall through
 	}
-	// Fallback: fetch the session.
 	try {
 		const session = await client.session.get({ path: { id: sessionID } })
-		const title = session?.data?.title ?? session?.data?.slug
-		return title ? String(title).slice(0, 50) : "Task"
+		const data = session?.data ?? {}
+		const title = data.title ?? data.slug
+		const cwd = data.cwd ?? data.workspace ?? data.directory
+		return {
+			title: title ? String(title).slice(0, 50) : "Task",
+			cwd: cwd ? String(cwd) : undefined,
+			updated: data?.time?.updated ?? undefined,
+		}
 	} catch {
-		return "Task"
+		return { title: "Task", cwd: undefined, updated: undefined }
 	}
 }
 
@@ -636,7 +831,22 @@ function toolStepLabel(part) {
 }
 
 /**
- * Build a one-line "recent steps" summary from the session's stored messages.
+ * Fetch a session's message timeline, tolerating both a bare array and a
+ * `{ data: [...] }` shape. Returns [] on any failure so callers degrade.
+ * @returns {Promise<any[]>}
+ */
+async function loadSessionMessages(client, sessionID) {
+	if (!client?.session?.messages) return []
+	try {
+		const res = await client.session.messages({ path: { id: sessionID } })
+		return Array.isArray(res) ? res : Array.isArray(res?.data) ? res.data : []
+	} catch {
+		return []
+	}
+}
+
+/**
+ * Build a one-line "recent steps" summary from session messages.
  *
  * Fetches the session timeline via `client.session.messages` and inspects
  * assistant message parts for tool invocations (`type === "tool"`). Returns the
@@ -652,30 +862,69 @@ function toolStepLabel(part) {
  * @returns {Promise<string>}
  */
 export async function buildStepSummary(client, sessionID, maxSteps = 3) {
-	if (!client?.session?.messages) return ""
+	return summaryFromMessages(await loadSessionMessages(client, sessionID), maxSteps)
+}
+
+/** Pure version of the step-summary builder, used when items are already loaded. */
+function summaryFromMessages(items, maxSteps) {
 	const limit = Number.isFinite(maxSteps) && maxSteps > 0 ? Math.floor(maxSteps) : 0
 	if (limit === 0) return ""
-	try {
-		const res = await client.session.messages({ path: { id: sessionID } })
-		const items = Array.isArray(res) ? res : Array.isArray(res?.data) ? res.data : []
-		const labels = []
-		for (let i = items.length - 1; i >= 0 && labels.length < limit; i--) {
-			const item = items[i]
-			const info = item?.info ?? item
-			const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
-			for (let j = parts.length - 1; j >= 0 && labels.length < limit; j--) {
-				const part = parts[j]
-				// Prefer completed tool steps; also accept raw-by-name tool parts.
-				if (part?.type !== "tool") continue
-				const label = toolStepLabel(part)
-				if (label) labels.push(label)
-			}
+	const labels = []
+	for (let i = items.length - 1; i >= 0 && labels.length < limit; i--) {
+		const item = items[i]
+		const info = item?.info ?? item
+		const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
+		for (let j = parts.length - 1; j >= 0 && labels.length < limit; j--) {
+			const part = parts[j]
+			// Prefer completed tool steps; also accept raw-by-name tool parts.
+			if (part?.type !== "tool") continue
+			const label = toolStepLabel(part)
+			if (label) labels.push(label)
 		}
-		if (labels.length === 0) return ""
-		return Array.from(new Set(labels)).reverse().join(" → ")
-	} catch {
-		return ""
 	}
+	if (labels.length === 0) return ""
+	return Array.from(new Set(labels)).reverse().join(" → ")
+}
+
+/**
+ * Classify how the session's latest run ended by inspecting the final assistant
+ * message part state. This replaces the flaky 1.5s time-window "error suppresses
+ * ready" heuristic with a robust state-based answer, independent of how long the
+ * idle event arrives after the error.
+ *
+ * @param {{session: any} | undefined} client
+ * @param {string} sessionID
+ * @returns {Promise<"error"|"aborted"|"complete"|null>}
+ */
+export async function getLastRunOutcome(client, sessionID) {
+	return lastRunOutcomeFromMessages(await loadSessionMessages(client, sessionID))
+}
+
+/** Pure version of the outcome classifier, used when items are already loaded. */
+function lastRunOutcomeFromMessages(items) {
+	// Scan from the newest message for the last assistant message with parts.
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]
+		const info = item?.info ?? item
+		const role = info?.role ?? item?.role
+		if (role !== "assistant") continue
+		const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
+		for (let j = parts.length - 1; j >= 0; j--) {
+			const part = parts[j]
+			const state = part?.state
+			if (state?.error) {
+				const name = String(state.error?.name ?? "").toLowerCase()
+				if (ABORT_ERROR_NAMES.some((n) => name.includes(n))) return "aborted"
+				return "error"
+			}
+			const st = String(state?.status ?? state?.state ?? state?.type ?? "").toLowerCase()
+			if (st === "aborted" || st === "abort" || st === "interrupted" || st === "cancelled") return "aborted"
+			if (st === "error" || st === "failed") return "error"
+		}
+		// A real assistant message with parts but no error/abort signal = finished.
+		if (parts.length > 0) return "complete"
+	}
+	return "complete"
 }
 
 // ==========================================
@@ -683,6 +932,9 @@ export async function buildStepSummary(client, sessionID, maxSteps = 3) {
 // ==========================================
 
 const DEDUPE_WINDOW_MS = 1500
+
+/** Cross-instance suppression window for heartbeat backfill toasts (6h). */
+const HEARTBEAT_DEDUPE_MS = 6 * 60 * 60 * 1000
 
 /**
  * A cross-instance dedupe store backed by a JSON file on disk.
@@ -725,19 +977,20 @@ function createSharedDedupeStore(filePath) {
 
 /**
  * @param {ReturnType<typeof createSharedDedupeStore> | null} [store]
+ * @param {number} [windowMs=DEDUPE_WINDOW_MS] suppress-repeat window
  * @returns {Dedupe}
  */
-function createDedupe(store = null) {
+function createDedupe(store = null, windowMs = DEDUPE_WINDOW_MS) {
 	return {
 		/** @returns {boolean} true if this notify should be sent (not recently sent) */
 		shouldSend(key) {
 			const now = Date.now()
 			const recent = store ? store.load() : new Map()
 			for (const [k, ts] of recent) {
-				if (now - ts >= DEDUPE_WINDOW_MS) recent.delete(k)
+				if (now - ts >= windowMs) recent.delete(k)
 			}
 			let should = true
-			if (key !== undefined && key !== null && now - (recent.get(key) ?? 0) < DEDUPE_WINDOW_MS) {
+			if (key !== undefined && key !== null && now - (recent.get(key) ?? 0) < windowMs) {
 				should = false
 			} else {
 				recent.set(key, now)
@@ -775,6 +1028,8 @@ export function createNotifyPlugin(overrides = {}) {
 		// Path of the cross-instance dedupe store (os.tmpdir by default). Set to
 		// a unique temp path in tests to keep harnesses isolated from each other.
 		dedupeStorePath = path.join(os.tmpdir(), "kdco-notify-win-dedupe.json"),
+		// Injectable clock for deterministic heartbeat tests.
+		now = () => Date.now(),
 	} = overrides
 
 	return async function NotifyPlugin(ctx) {
@@ -786,6 +1041,23 @@ export function createNotifyPlugin(overrides = {}) {
 		const readyDedupe = createDedupe(dedupeStore)
 		const permissionDedupe = createDedupe(dedupeStore)
 		const errorDedupe = createDedupe(dedupeStore)
+		// Long-window dedupe so a heartbeat backfill can't be double-sent by the
+		// global+project copies of the plugin sharing the same store file.
+		const heartbeatDedupe = createDedupe(dedupeStore, HEARTBEAT_DEDUPE_MS)
+		// Heartbeat state: sessions that were recently active but may have ended
+		// silently (no session.error / session.idle event reached us).
+		const activeSessions = new Map() // sessionID -> { lastActivity, lastWarned }
+		/**
+		 * Shared per-run "this run got a terminal toast" claim. Keyed by the
+		 * session's `time.updated` (stable once a run finishes) so READY/ERROR/
+		 * CANCELLED and the heartbeat agree across plugin instances AND across
+		 * run reuse of the same sessionID. Heartbeat won't re-notify a run that
+		 * already produced a terminal toast, and a NEW run gets a fresh claim.
+		 */
+		const claimRunNotified = (updated, sessionID) => {
+			const token = updated ? `hb:${sessionID}:${String(updated)}` : `hb:${sessionID}`
+			heartbeatDedupe.shouldSend(token)
+		}
 
 		// Register a branded Start-Menu shortcut for the toast app icon (once).
 		// Best-effort AND non-blocking: PowerShell shortcut validation can take
@@ -802,7 +1074,7 @@ export function createNotifyPlugin(overrides = {}) {
 			terminal = null
 		}
 
-		const buildNotifyOptions = ({ title, message, sound, theme, clickProgram, clickArgs }) => ({
+		const buildNotifyOptions = ({ title, message, sound, theme, clickProgram, clickArgs, clickFallbackProgram, clickFallbackArgs }) => ({
 			title,
 			message,
 			sound,
@@ -810,6 +1082,8 @@ export function createNotifyPlugin(overrides = {}) {
 			iconTheme: config.iconTheme,
 			clickProgram,
 			clickArgs,
+			clickFallbackProgram,
+			clickFallbackArgs,
 		})
 
 		const send = (opts) => {
@@ -825,15 +1099,59 @@ export function createNotifyPlugin(overrides = {}) {
 			return isParentSession(client, sessionID)
 		}
 
-		// Resolve effective notification extras from config: global sound override,
-		// click-to-open program (clickProgram/clickArgs). Returns an object merged
-		// into every send() call.
-		const notifyExtras = () => {
+		/**
+		 * Resolve the click-to-open plan for a notification.
+		 *
+		 * Precedence:
+		 *   1. clickMode === "off"                       -> no click
+		 *   2. explicit config.clickProgram              -> custom program (documented feature)
+		 *   3. clickMode === "simple"                     -> plain wt.exe
+		 *   4. clickMode === "helper" (default)           -> jump-to-opencode.ps1 (+ simple fallback)
+		 * Placeholders ({{title}}/{{cwd}}/{{sessionID}}) are substituted from the
+		 * per-notification context so the helper knows which session to jump to.
+		 */
+		const resolveClickPlan = (cfg) => {
+			const mode = cfg.clickMode ?? "helper"
+			if (mode === "off") return null
+			if (cfg.clickProgram) {
+				return {
+					target: { program: cfg.clickProgram, args: Array.isArray(cfg.clickArgs) ? cfg.clickArgs.map(String) : [] },
+					fallback: null,
+				}
+			}
+			if (mode === "simple") {
+				return {
+					target: { program: "wt.exe", args: ["-d", "{{cwd}}", "opencode"] },
+					fallback: null,
+				}
+			}
+			const helper = path.join(PLUGIN_DIR, "jump-to-opencode.ps1")
+			return {
+				target: {
+					program: "powershell",
+					args: [
+						"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+						"-File", helper,
+						"-Title", "{{title}}", "-Cwd", "{{cwd}}", "-SessionId", "{{sessionID}}",
+					],
+				},
+				fallback: { program: "wt.exe", args: ["-d", "{{cwd}}", "opencode"] },
+			}
+		}
+
+		// Resolve effective notification extras from config: global sound override
+		// and click-to-open plan (substituted with the notification's context).
+		const notifyExtras = (ctx = {}) => {
 			const extras = {}
 			if (config.soundOverride) extras.sound = config.soundOverride
-			if (config.clickProgram) {
-				extras.clickProgram = config.clickProgram
-				if (Array.isArray(config.clickArgs)) extras.clickArgs = config.clickArgs
+			const plan = resolveClickPlan(config)
+			if (plan) {
+				extras.clickProgram = substitutePlaceholders(plan.target.program, ctx)
+				extras.clickArgs = plan.target.args.map((a) => substitutePlaceholders(a, ctx))
+				if (plan.fallback) {
+					extras.clickFallbackProgram = substitutePlaceholders(plan.fallback.program, ctx)
+					extras.clickFallbackArgs = plan.fallback.args.map((a) => substitutePlaceholders(a, ctx))
+				}
 			}
 			return extras
 		}
@@ -842,14 +1160,15 @@ export function createNotifyPlugin(overrides = {}) {
 		//   [2026-08-05 14:23:11]
 		//   <session title / error message>
 		//   Steps: Read file X → Bash ls   (when available & enabled)
-		const composeMessage = async ({ kind, title, fallback }) => {
+		const composeMessage = async ({ kind, title, fallback, steps }) => {
 			const lines = []
 			if (config.showTimestamp !== false) lines.push(formatTimestamp())
 			if (title) lines.push(title)
 			else if (fallback) lines.push(fallback)
-			if (config.showSummary && config.summarySteps && config.summarySteps > 0 && kind === "ready") {
-				const steps = await buildStepSummary(client, currentSessionID, config.summarySteps)
-				if (steps) lines.push(`Steps: ${steps}`)
+			if (kind === "ready" && config.showSummary && config.summarySteps && config.summarySteps > 0) {
+				// `steps` may be precomputed by the caller to avoid a second fetch.
+				const summary = steps !== undefined ? steps : await buildStepSummary(client, currentSessionID, config.summarySteps)
+				if (summary) lines.push(`Steps: ${summary}`)
 			}
 			return lines.join("\n")
 		}
@@ -866,14 +1185,48 @@ export function createNotifyPlugin(overrides = {}) {
 			if (isQuietHours(config)) return
 
 			currentSessionID = sessionID
-			const title = await getSessionTitle(client, sessionID, info)
-			const message = await composeMessage({ kind: "ready", title, fallback: "Task complete" })
+			// Fetch the timeline once; drive BOTH the run-outcome classification and
+			// the step summary from it, so idle costs a single messages round-trip.
+			const messages = await loadSessionMessages(client, sessionID)
+			const outcome = lastRunOutcomeFromMessages(messages)
+			const ctx = await getSessionContext(client, sessionID, info)
+
+			// A run that ended in error must NOT announce READY later. This is the
+			// robust (state-based) counterpart to the 1.5s time-window suppression.
+			if (outcome === "error") return
+
+			if (outcome === "aborted" && config.notifyCancelled !== false) {
+				activeSessions.delete(sessionID)
+				claimRunNotified(ctx.updated, sessionID)
+				const message = await composeMessage({
+					kind: "cancelled",
+					title: ctx.title,
+					fallback: "Session stopped",
+				})
+				send({
+					title: "STOPPED BY YOU",
+					message,
+					sound: config.sounds.cancelled ?? config.sounds.idle,
+					theme: "cancelled",
+					...notifyExtras({ ...ctx, sessionID }),
+				})
+				return
+			}
+
+			activeSessions.delete(sessionID)
+			claimRunNotified(ctx.updated, sessionID)
+			const message = await composeMessage({
+				kind: "ready",
+				title: ctx.title,
+				fallback: "Task complete",
+				steps: summaryFromMessages(messages, config.summarySteps),
+			})
 			send({
 				title: "READY FOR REVIEW",
 				message,
 				sound: config.sounds.idle,
 				theme: "ready",
-				...notifyExtras(),
+				...notifyExtras({ ...ctx, sessionID }),
 			})
 		}
 
@@ -886,17 +1239,20 @@ export function createNotifyPlugin(overrides = {}) {
 
 			const message = rawError?.slice(0, 100) || "Something went wrong"
 			const body = await composeMessage({ kind: "error", title: message })
+			const ctx = await getSessionContext(client, sessionID)
 			// A failed session should NOT also announce "ready" moments later.
 			// Mark the same session's ready key as recently-sent so any idle event
 			// arriving within the dedupe window is suppressed.
 			readyDedupe.shouldSend(`ready:${sessionID}`)
+			activeSessions.delete(sessionID)
+			claimRunNotified(ctx.updated, sessionID)
 			if (isNetwork) {
 				send({
 					title: "NETWORK INTERRUPTED",
 					message: body,
 					sound: config.sounds.network,
 					theme: "network",
-					...notifyExtras(),
+					...notifyExtras({ ...ctx, sessionID }),
 				})
 				beep(config.beepOnInterruption)
 			} else {
@@ -905,7 +1261,7 @@ export function createNotifyPlugin(overrides = {}) {
 					message: body,
 					sound: config.sounds.error,
 					theme: "error",
-					...notifyExtras(),
+					...notifyExtras({ ...ctx, sessionID }),
 				})
 			}
 		}
@@ -934,12 +1290,122 @@ export function createNotifyPlugin(overrides = {}) {
 			})
 		}
 
+		// ---- heartbeat (silent-stop watchdog) ----
+
+		/** Record that a session is actively producing output right now. */
+		const markActive = (sessionID) => {
+			if (!sessionID) return
+			const prev = activeSessions.get(sessionID)
+			activeSessions.set(sessionID, { lastActivity: now(), lastWarned: prev?.lastWarned ?? 0 })
+			// Bounded: never track more than this many recent sessions.
+			if (activeSessions.size > 50) {
+				const oldest = [...activeSessions.entries()].sort((a, b) => a[1].lastActivity - b[1].lastActivity)[0]
+				if (oldest) activeSessions.delete(oldest[0])
+			}
+		}
+
+		/**
+		 * Poll sessions that went quiet past `stallSec` but never delivered a
+		 * terminal event to the plugin. If one actually ended (idle/complete/error
+		 * per `client.session.get`) but was never notified, we backfill a
+		 * "SESSION ENDED" toast — closing the "stream died silently" gap that pure
+		 * event handling can never see. Also (optionally) warns while a session is
+		 * STILL running but idle-past-stall.
+		 */
+		const heartbeatTick = async () => {
+			if (isQuietHours(config)) return
+			const hb = config.heartbeat ?? {}
+			const stallMs = (Number(hb.stallSec) || 120) * 1000
+			const warn = !!hb.warnWhileStalled
+			const at = now()
+			for (const [sessionID, rec] of [...activeSessions.entries()]) {
+				const staleFor = at - rec.lastActivity
+				if (staleFor < stallMs) continue // still within the healthy window
+
+				let state = null
+				let updated = null
+				try {
+					const session = await client.session.get({ path: { id: sessionID } })
+					const d = session?.data
+					if (d) {
+						updated = d?.time?.updated ?? null
+						const status = typeof d.status?.type === "string" ? d.status.type : typeof d.status === "string" ? d.status : null
+						const s = status?.toLowerCase()
+						if (s && ["idle", "complete", "completed", "done", "error", "failed"].includes(s)) state = s
+						else if (s && ["running", "busy", "pending", "working", "active"].includes(s)) state = "running"
+						else if (d.time?.completed) state = "idle"
+						else if (d.time?.updated) state = "running"
+					}
+				} catch {
+					// ignore: leave this session for a later tick
+				}
+
+				if (state === "idle" || state === "error" || state === "failed" || state === "complete") {
+					// Terminal, but we never got a terminal event -> backfill. The
+					// per-run shared dedupe keeps global+project copies from double
+					// sending and skips runs that already produced a terminal toast.
+					const runToken = updated ? `hb:${sessionID}:${updated}` : `hb:${sessionID}`
+					if (heartbeatDedupe.shouldSend(runToken)) {
+						activeSessions.delete(sessionID)
+						const ctx = await getSessionContext(client, sessionID)
+						const body = await composeMessage({
+							kind: "ready",
+							title: ctx.title,
+							fallback: "Session ended without a status event",
+						})
+						send({
+							title: "SESSION ENDED",
+							message: body,
+							sound: config.sounds.idle,
+							theme: "ready",
+							...notifyExtras({ ...ctx, sessionID }),
+						})
+					}
+					continue
+				}
+
+				if (state === "running" && warn) {
+					// Still busy but silent past the stall -> telegraph the problem.
+					if (at - rec.lastWarned >= stallMs) {
+						const rec2 = activeSessions.get(sessionID)
+						if (rec2) rec2.lastWarned = at
+						if (heartbeatDedupe.shouldSend(`hb-stall:${sessionID}`)) {
+							const ctx = await getSessionContext(client, sessionID)
+							const body = await composeMessage({
+								kind: "network",
+								title: "No output received — the run may be stuck or offline.",
+								fallback: ctx.title,
+							})
+							send({
+								title: "SESSION STALLED",
+								message: body,
+								sound: config.sounds.network,
+								theme: "network",
+								...notifyExtras({ ...ctx, sessionID }),
+							})
+						}
+					}
+				}
+				// Unknown state: keep tracking (next tick re-probes).
+			}
+		}
+
+		const hbConfig = config.heartbeat ?? {}
+		if (hbConfig.enabled !== false) {
+			const intervalSec = hbConfig.intervalSec || 30
+			const timer = setInterval(() => {
+				heartbeatTick().catch(() => {})
+			}, Math.max(1, intervalSec) * 1000)
+			if (typeof timer?.unref === "function") timer.unref()
+		}
+
 		// ---- event wiring ----
 
 		const toId = (v) => (typeof v === "string" && v.trim() ? v.trim() : null)
 
 		return {
 			"tool.execute.before": async (input) => {
+				if (input?.sessionID) markActive(String(input.sessionID))
 				if (input?.tool === "question") {
 					const key = `${input?.sessionID}:${input?.callID}`
 					if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
@@ -952,13 +1418,21 @@ export function createNotifyPlugin(overrides = {}) {
 				switch (type) {
 					case "session.status": {
 						// session.status fires for BOTH busy and idle transitions.
-						// Only notify on the idle transition, never on busy.
+						// Track busy activity for the heartbeat; notify only on idle.
 						const statusType = props?.status?.type
-						if (statusType !== "idle") break
 						const id = toId(props?.sessionID)
+						if (id && (statusType === "busy" || statusType === "running" || statusType === "working" || statusType === "pending")) {
+							markActive(id)
+						}
+						if (statusType !== "idle") break
 						if (id && readyDedupe.shouldSend(`ready:${id}`)) {
 							await handleSessionIdle(id, props?.info)
 						}
+						break
+					}
+					case "message.part.updated": {
+						const id = toId(props?.sessionID)
+						if (id) markActive(id)
 						break
 					}
 					case "session.idle": {
@@ -989,6 +1463,8 @@ export function createNotifyPlugin(overrides = {}) {
 					}
 				}
 			},
+			// Exposed for tests (and harmless to OpenCode, which ignores it).
+			heartbeatTick,
 		}
 	}
 }

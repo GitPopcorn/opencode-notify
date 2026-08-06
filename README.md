@@ -25,6 +25,7 @@ Resulting layout (this is what must be in the plugins root):
 ```
 ~/.config/opencode/plugins/          (or .opencode/plugins/)
 ├── kdco-notify-win.js     # entry — auto-loaded
+├── jump-to-opencode.ps1   # click-to-open helper (clickMode = "helper")
 ├── assets/                # icon + banner
 └── node_modules/          # vendored node-notifier + detect-terminal
 ```
@@ -34,6 +35,7 @@ Resulting layout (this is what must be in the plugins root):
 ```powershell
 # Copy the flattened contents INTO the plugins root (not as a subfolder)
 copy dist\kdco-notify-win\kdco-notify-win.js  %USERPROFILE%\.config\opencode\plugins\
+copy dist\kdco-notify-win\jump-to-opencode.ps1 %USERPROFILE%\.config\opencode\plugins\
 xcopy dist\kdco-notify-win\node_modules       %USERPROFILE%\.config\opencode\plugins\node_modules\ /E
 xcopy dist\kdco-notify-win\assets             %USERPROFILE%\.config\opencode\plugins\assets\ /E
 
@@ -58,6 +60,8 @@ The plugin loads standalone even if deps are missing, but logs a warning instead
 | Session complete (`session.idle`) | Yes | READY FOR REVIEW |
 | Session error | Yes | SOMETHING WENT WRONG |
 | Network / HTTP interruption | Yes | **NETWORK INTERRUPTED** (+ system beep) |
+| Run stopped by user (ESC / cancel) | Yes (`notifyCancelled`) | **STOPPED BY YOU** |
+| Session ended silently, never emitted an event | Yes (heartbeat) | **SESSION ENDED** |
 | Permission needed | Yes | WAITING FOR CONFIRMATION |
 | Question asked | Yes | QUESTION FOR YOU |
 | Sub-task events | No (default) | Set `notifyChildSessions: true` to include |
@@ -75,7 +79,13 @@ The original record asked whether the plugin can notify on **explicit** interrup
 
 Classified errors use a distinct *NETWORK INTERRUPTED* title and an optional system beep (config `beepOnInterruption`).
 
-> **Boundary:** if OpenCode itself goes fully silent (no `session.error` emitted at all), a pure plugin cannot know. This is a limit of the plugin model, not a bug.
+A network failure must not be followed by a "READY FOR REVIEW" toast for the same run. Suppression is **state-driven** (not just a 1.5s time window): when a session goes idle, the plugin checks the final assistant message-part state — if the run ended in error, READY is suppressed; if it ended in a user stop, a distinct *STOPPED BY YOU* toast fires instead.
+
+> **Boundary:** if OpenCode itself goes fully silent (no `session.error` emitted at all *and* the run stays marked running), a pure event-based plugin cannot know. The heartbeat watchdog covers the part where OpenCode *did* transition the session to a terminal state without emitting an event; if the session is still marked running, enable `heartbeat.warnWhileStalled` to be told about the stall.
+
+## Known observations (logged, not yet investigated)
+
+- One `INTERNET INTERRUPT` was not notified once; the most recent `NETWORK INTERRUPTED` toast at the time was at `12:00:00`. Possibly a real miss, possibly user confusion — recorded for later investigation, related to the heartbeat watchdog above.
 
 ## Configuration (Optional)
 
@@ -89,7 +99,8 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
     "error": "Notification.Reminder",
     "permission": "Notification.SMS",
     "question": "Notification.IM",
-    "network": "Notification.Mail"
+    "network": "Notification.Mail",
+    "cancelled": "Notification.Mail"
   },
   "quietHours": { "enabled": false, "start": "22:00", "end": "08:00" },
   "beepOnInterruption": true,
@@ -99,23 +110,35 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
   "themedIcons": true,
   "iconTheme": "legacy",
   "soundOverride": "",
+  "clickMode": "helper",
   "clickProgram": "",
-  "clickArgs": []
+  "clickArgs": [],
+  "notifyCancelled": true,
+  "heartbeat": {
+    "enabled": true,
+    "intervalSec": 30,
+    "stallSec": 120,
+    "warnWhileStalled": false
+  }
 }
 ```
 
 Notes:
 - **`sound`** — a Windows toast preset name in the `Notification.*` namespace (`Notification.Mail`, `Notification.Reminder`, `Notification.SMS`, `Notification.IM`, `Notification.Looping.Call`, …). Values that are NOT `Notification.*`-prefixed (the old `Glass`/`Basso`/`Submarine` names) are normalized to `Notification.Reminder`, because SnoreToast rejects bare names and shows no toast at all. Verified audible on this machine: `Mail`, `Reminder`, `SMS`, `IM`, `Looping.Call`. `Notification.Default` is **silent** on this system, so it is avoided as a default.
 - **`soundOverride`** — a `Notification.*` preset name that overrides the per-kind `sound`. (SnoreToast's `-s` accepts sound URIs / `ms-winsoundevent` names; absolute `.wav` paths are not supported and are normalized to `Notification.Reminder`.)
-- **`clickProgram` + `clickArgs`** — open something when the toast is clicked. For example to open Windows Terminal with OpenCode:
-  ```json
-  { "clickProgram": "wt.exe", "clickArgs": ["-d", ".", "opencode"] }
-  ```
-  Click-to-open uses `-application` (and `-la` for its args), which only works because the self-hosted sender passes those flags — node-notifier's whitelist dropped them.
+- **`clickMode`** — what a toast click does (`"helper"` default | `"simple"` | `"off"`):
+  - `helper` (default): run the bundled `jump-to-opencode.ps1` — if a Windows Terminal is already running, bring the best-matching window to the foreground (session title, else any `opencode` window, else the most recent); only if **no** `wt.exe` is running does it open a fresh tab running `opencode` in the session's working directory. If the helper is missing or fails it falls back to `simple`.
+  - `simple`: plain `wt.exe -d <cwd> opencode`.
+  - `off`: clicking does nothing.
+  - An explicit `clickProgram` always wins over these modes (used for a fully custom program). `clickArgs` may contain `{{title}}`, `{{cwd}}`, `{{sessionID}}` placeholders, substituted per notification.
+- **Run cancellation (ESC)** — when a run is stopped by the user, OpenCode takes the session idle without an error; the plugin detects this from the final message-part state and sends a distinct **STOPPED BY YOU** toast with its own grey banner. Disable with `"notifyCancelled": false`.
+- **Heartbeat (silent-stop watchdog)** — if a run goes quiet past `stallSec` (default 120s) and then ends **without** any `session.error`/`session.idle` event reaching the plugin, the heartbeat polls the session's real state and backfills a **SESSION ENDED** toast (body notes "not received an end signal"). `warnWhileStalled: true` additionally telegraphs a **SESSION STALLED** warning while a session is *still* running but silent past the stall. This closes the "no notification at all on silent network death" gap that pure event handling can never see. It is on by default.
+- **Click-to-open implementation note** — the click handler reads the activation callback SnoreToast writes to the named pipe (previously that pipe's data was ignored and closed after 1.5s, so clicks did nothing). The pipe is now kept open for the toast's lifetime **only when a click target is configured**; the no-click path is unchanged (1.5s then release).
+- **Precise-tab limitation** — Windows Terminal exposes no stable public CLI to focus an *arbitrary* tab by title. The helper focuses the matching *window* (whose title mirrors the focused tab). Exact per-session tab pinning is best-effort and not guaranteed.
+- `terminal` (optional) overrides terminal auto-detection.
 - **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`).
 - **`showSummary` / `summarySteps`** — for READY notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).
-- **`themedIcons`** — use the per-kind colored hero banner (ready=green, error=orange, network=red, permission=yellow, question=blue) when the asset exists (default `true`).
-- `terminal` (optional) overrides terminal auto-detection.
+- **`themedIcons`** — use the per-kind colored hero banner (ready=green, error=orange, network=red, permission=yellow, question=blue, cancelled=grey) when the asset exists (default `true`).
 - `quietHours` supports overnight windows (e.g. `22:00`–`08:00`).
 
 ## Development

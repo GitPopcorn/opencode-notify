@@ -144,3 +144,42 @@ opencode-notify/
 - [x] 部署到全局 `~/.config/opencode/plugins/` 与项目 `.opencode/plugins/`，hash 与源码一致。
 - [x] `test/demo.mjs` 用真实 SnoreToast 弹窗验证（时间戳 + 摘要 + ready 主题 banner）。
 - [x] 自托管 `sendWindowsToast` 已用真实 vendored `snoretoast-x64.exe` 弹窗验证（含 `-pipeName`）。
+
+---
+
+## 9. 扩展轮（2026-08-06）：点击跳转修复 + ESC 取消类别 + 心跳兜底
+
+> 覆盖四个需求：点击通知跳转 Windows Terminal、NETWORK 后偶发 READY 的根治、ESC 打断单独通知、静默中断补通知。
+
+### 9.1 点击通知跳转（根因 + 修复）
+
+- **根因**：`sendWindowsToast` 总是建命名管道并传 `-pipeName`，而 SnoreToast 的 `-application` 语义是「仅当管道不存在时才启动程序」。管道始终存在、且 server 完全忽略写入的数据并 1500ms 后关闭 → 点击只把 `action=activate` 写进没人读的管道，无任何效果。
+- **修复**：管道连接读取激活回调（`utf16le`/`utf8` 双解码，命中 `activate/clicked`），在进程内 `spawn(clickProgram)`；仅当配置了点击目标时才保持管道直到 SnoreToast 退出（30s 兜底），无点击目标路径与旧行为完全一致。
+- **`clickMode`**（`helper` 默认 / `simple` / `off`）：helper 走 `jump-to-opencode.ps1`——已有 wt.exe 则聚焦匹配窗口，无 wt.exe 才开新 tab；helper 失败回退 simple（`wt.exe -d <cwd> opencode`）。`clickArgs` 支持 `{{title}}/{{cwd}}/{{sessionID}}` 占位符。
+- **精确 tab 定位**：WT 无稳定公开 CLI 可按标题聚焦任意 tab，helper 只能聚焦「标题匹配的窗口」+ 兜底新 tab，已在 README 声明为尽力而为。
+- 默认路径（无点击配置）字节级不变；`releasePipeAfter` 对测试假 spawn（无 `child.on`）防空，避免破坏注入式单测。
+
+### 9.2 READY-after-NETWORK 根治（状态驱动，替代 1.5s 时间窗）
+
+- 旧逻辑只用 `DEDUPE_WINDOW_MS=1500` + 精确 sessionID 抑制 ready，重试/延迟超过窗口即失效 → 「NETWORK 后又 READY」是真实可达路径（非不可能）。
+- 新逻辑 `getLastRunOutcome()` 读末尾 assistant part 状态：`state.error` → error（抑制 READY）；`AbortError`/`status:'aborted'` 等 → aborted；否则 complete。`handleSessionIdle` 三态化。对任意延迟与 session 跨 run 复用均免疫。
+- 保留原 1.5s 抑制作为双保险；无法读取消息时回退旧行为。
+
+### 9.3 ESC 打断单独通知
+
+- 用户 ESC → OpenCode 直接转 idle（无 error）→ 旧逻辑弹 READY。现在检测到 `aborted` 结局 → 独立 **STOPPED BY YOU** + 灰色 banner（`themes` 字典新增 `cancelled`，flat/legacy 两套重新生成）。`notifyCancelled:false` 回退 READY。
+- 说明：`aborted` 的确切 part 状态取值需在真实 OpenCode 事件流中核对；当前同时匹配 `state.error.name`（AbortError/UserInterrupt/Stop 等）与 `state.status` 两种信号，若真实取值不同可回退按键特征判定。
+
+### 9.4 心跳兜底（静默中断补通知）
+
+- 事件驱动无法感知「OpenCode 不发任何事件」的静默死亡 → 新增 watchdog：`session.status busy`/`message.part.updated`/`tool.execute.*` 更新 `activeSessions` 活动时间；每 `intervalSec`(30s, `unref()`) 对超过 `stallSec`(默认 120s) 无活动的 session 轮询 `client.session.get` 真实状态。
+  - 终态但未通知 → 补发 **SESSION ENDED**（正文标注未收到结束信号）。
+  - 仍在 running 且 `warnWhileStalled:true` → **SESSION STALLED** 警告（默认关，避免长 thinking 误报）。
+- 跨实例去重：以 `hb:<id>:<time.updated>`（run 级 token，6h 窗口）在共享 dedupe 文件中声明，READY/ERROR/CANCELLED 处理时同样声明该 token → 全局+项目双实例不会重复补发，且新 run 因 updated 变化可获得全新 token。
+- 默认开启（`heartbeat.enabled:true`）。
+
+### 9.5 全局核验与问题记录
+
+- [x] 默认无点击路径字节级不变；`node test/notify.test.mjs` 56 项全绿（含管道点击集成、outcome 分类、超窗抑制、CANCELLED、心跳补发/不补发/跨实例去重、占位符）。
+- [x] `scripts/deploy.ps1` 增加复制 `jump-to-opencode.ps1`。
+- 已知问题（暂不排查）：一次 `INTERNET INTERRUPT` 未通知，最近一次 NETWORK toast 为 12:00:00；已记录，与心跳方向相关。
