@@ -279,3 +279,11 @@ opencode-notify/
 - [x] 已部署两处并逐字节一致（项目目标配置保留不改）。
 - [x] 本处修复体现到 README。
 - 现场待二次确认：重启后实际双击 ESC，应只出 STOPPED BY YOU（或静默），日志出现 `L2003 ...ms after user-cancel suppressed`。
+
+### 13.3 配置命名收敛（`kdco-notify-win.jsonc` + 全局 JSONC）
+
+- 用户要求：项目级配置文件命名统一为 **`kdco-notify-win.jsonc`**（与插件同名，避免与其他工具的 `kdco-notify.json` 混淆），全局配置也换成 **JSONC** 以支持注释。
+- `resolveConfigPath` 候选顺序改为：项目 `kdco-notify-win.jsonc` → `.json` → 旧名 `kdco-notify.jsonc`/`.json`（legacy 兼容）→ 全局 `kdco-notify-win.jsonc` → `.json` → 旧名。
+- 仓库范例 `kdco-notify.jsonc` 重命名为 `.opencode/plugin/config/kdco-notify-win.jsonc`；`deploy.ps1` 改拷新名、写入目标时移除旧名 `kdco-notify.jsonc/.json` 残留（防旧配置遮蔽）。
+- 全局：新建 `~/.config/opencode/kdco-notify-win.jsonc`（完整注释模板，承继原 `{"iconTheme":"legacy"}`，`logging.enabled:false` 避免全局刷盘），并删除旧 `~/.config/opencode/kdco-notify.json`。
+- 验证：两处部署逐字节一致；`E:\vscode-workspace-temp` 下 `resolveConfigPath()` 正确返回项目 `kdco-notify-win.jsonc`；两个 jsonc 均能过 `parseJsonc`；notify 81 / logger 12 全绿。

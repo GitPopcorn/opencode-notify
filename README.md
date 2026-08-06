@@ -102,12 +102,12 @@ Works out of the box. Config is **JSONC** (comments + trailing commas allowed) a
 
 | Priority | File | Scope |
 |---|---|---|
-| 1 | `<project>/.opencode/plugin/config/kdco-notify.jsonc` | Project-level (a project-scoped deployment carries its own settings) |
-| 2 | `<project>/.opencode/plugin/config/kdco-notify.json` | Project-level (plain JSON) |
-| 3 | `~/.config/opencode/kdco-notify.jsonc` | Global (all projects) |
-| 4 | `~/.config/opencode/kdco-notify.json` | Global (plain JSON) |
+| 1 | `<project>/.opencode/plugin/config/kdco-notify-win.jsonc` | Project-level (a project-scoped deployment carries its own settings) |
+| 2 | `<project>/.opencode/plugin/config/kdco-notify-win.json` | Project-level (plain JSON) |
+| 3 | `~/.config/opencode/kdco-notify-win.jsonc` | Global (all projects) |
+| 4 | `~/.config/opencode/kdco-notify-win.json` | Global (plain JSON) |
 
-The first existing file wins. An annotated template with **every option documented inline** ships as `.opencode/plugin/config/kdco-notify.jsonc` (deployed to a project target by `scripts/deploy.ps1`, written only if missing so your edits survive redeploys). `logging` hot-reloads on file change; the rest applies on OpenCode restart.
+Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same directories are also honored (after the `-win` names). The first existing file wins. An annotated template with **every option documented inline** ships as `.opencode/plugin/config/kdco-notify-win.jsonc` (deployed to a project target by `scripts/deploy.ps1`, written only if missing so your edits survive redeploys; a matching `kdco-notify-win.jsonc` also exists at the global path, pre-filled with your old settings and comments). `logging` hot-reloads on file change; the rest applies on OpenCode restart.
 
 ```jsonc
 {
