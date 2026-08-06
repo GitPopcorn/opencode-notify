@@ -618,6 +618,59 @@ async function main() {
 		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 	})
 
+	await test("double-ESC: network error right after user-cancel is suppressed", async () => {
+		let clock = 1_000_000
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "My Task", parentID: null } }),
+				messages: async () => [],
+			},
+		}
+		const h = await makeHarness({ client, config: baseConfig(), now: () => clock })
+		// 1st ESC -> user-cancel toast.
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "This operation was aborted" } } })
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		// Wait past the 1.5s errorDedupe window (real clock) so the 2nd error
+		// actually reaches handleSessionError; the fake clock keeps it inside the
+		// 5s cancel window.
+		await new Promise((r) => setTimeout(r, 1600))
+		clock += 2000
+		// 2nd ESC aborts the in-flight fetch, which surfaces as a real connection
+		// signature. It is the teardown of the request we just cancelled, so it
+		// must NOT be announced as NETWORK INTERRUPTED.
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
+		assert.equal(h.sent.length, 1, "network toast suppressed after user-cancel")
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+	})
+
+	await test("network error long after user-cancel is NOT suppressed", async () => {
+		let clock = 1_000_000
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "My Task", parentID: null } }),
+				messages: async () => [],
+			},
+		}
+		const h = await makeHarness({ client, config: baseConfig(), now: () => clock })
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "This operation was aborted" } } })
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		// Past errorDedupe's 1.5s (real clock) AND past the 5s cancel window
+		// (fake clock), so the network error must fire normally.
+		await new Promise((r) => setTimeout(r, 1600))
+		clock += 60_000
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
+		assert.equal(h.sent.length, 2, "real network error fires after the window")
+		assert.equal(h.sent[1].title, "NETWORK INTERRUPTED")
+	})
+
+	await test("network error WITHOUT a prior user-cancel still fires", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+	})
+
 	console.log("heartbeat watchdog:")
 	await test("heartbeat backfills SESSION ENDED for a silently-ended session", async () => {
 		let clock = 1_000_000

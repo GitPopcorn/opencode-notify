@@ -262,3 +262,20 @@ opencode-notify/
 - [x] `node test/notify.test.mjs` **78 passed**（+4 parseJsonc）；`node test/logger.test.mjs` **12 passed**（+2 enabled/热恢复）。
 - [ ] 部署两处目标 + 逐字节校验 + 确认项目目标已带配置；提交。
 - 现场待办：重启后在项目里双击 ESC，读 `%TEMP%\kdcokenny-notify-win\{date}-kdcokenny-notify-win.log` 的 `L2001/L2002`（原始 error payload + 分类）定位为何仍判 NETWORK——若 payload 是「含 aborted 又含连接特征」的 nameless 字符串，`USER_STOP_TEXT_HINTS` 会被网络签名分支盖过，届时按真实字符串调整 hint 优先级。
+
+## 13. 双击 ESC 误报 NETWORK 根治轮（2026-08-06）：取消后网络连带抑制
+
+> 真实 payload（日志 L2001/L2002）证实了机制：双击 ESC 产生**两个** `session.error`——先 `This operation was aborted`（判 user-cancel → STOPPED BY YOU），随后 `fetch failed: read ECONNRESET`（第二次 ESC 把进行中的请求撕掉，undici 上报连接重置）→ 判 network → 又弹 NETWORK INTERRUPTED。
+
+### 13.1 修复
+
+- 新增 `NETWORK_AFTER_CANCEL_MS = 5_000` 与按 session 的 `lastUserCancel` 时间戳（`Map`）。
+- `handleSessionError`：判定 user-cancel 时记录 `lastUserCancel[sid]=now()`；随后判为 network/http 的 error 若与上次 user-cancel 相隔 `< 5s`，记 `L2003` 并直接返回（STOPPED BY YOU 已发或按 `notifyCancelled:false` 静默，绝不再堆 NETWORK）。
+- 真实网络中断（无前置 user-cancel，或距上次取消 >5s）仍正常弹 NETWORK，不受影响。
+
+### 13.2 核验
+
+- [x] `node test/notify.test.mjs` **81 passed**（新增 3 例：双击抑制、超窗不抑制、无取消仍弹）。
+- [x] 已部署两处并逐字节一致（项目目标配置保留不改）。
+- [x] 本处修复体现到 README。
+- 现场待二次确认：重启后实际双击 ESC，应只出 STOPPED BY YOU（或静默），日志出现 `L2003 ...ms after user-cancel suppressed`。

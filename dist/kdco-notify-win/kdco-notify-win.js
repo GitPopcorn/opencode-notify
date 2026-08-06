@@ -1164,6 +1164,17 @@ const DEDUPE_WINDOW_MS = 1500
 const HEARTBEAT_DEDUPE_MS = 6 * 60 * 60 * 1000
 
 /**
+ * When the user interrupts a run (ESC), OpenCode aborts the in-flight request;
+ * that teardown frequently surfaces as a SECOND `session.error` carrying a real
+ * connection signature ("fetch failed: read ECONNRESET"). Without this, a plain
+ * double-ESC fires a scary "NETWORK INTERRUPTED" toast on top of "STOPPED BY
+ * YOU". A network/http error that lands within this window AFTER a user-cancel
+ * for the SAME session is therefore treated as the abort tearing the connection
+ * down, and its toast is suppressed.
+ */
+const NETWORK_AFTER_CANCEL_MS = 5_000
+
+/**
  * A cross-instance dedupe store backed by a JSON file on disk.
  *
  * OpenCode loads plugins from BOTH the global plugins dir and the project
@@ -1316,6 +1327,9 @@ export function createNotifyPlugin(overrides = {}) {
 		// Heartbeat state: sessions that were recently active but may have ended
 		// silently (no session.error / session.idle event reached us).
 		const activeSessions = new Map() // sessionID -> { lastActivity, lastWarned }
+		// Timestamp of the most recent user-cancel per session, used to suppress a
+		// network-looking error that's just the abort tearing down the request.
+		const lastUserCancel = new Map() // sessionID -> epoch ms
 		/**
 		 * Shared per-run "this run got a terminal toast" claim. Keyed by the
 		 * session's `time.updated` (stable once a run finishes) so READY/ERROR/
@@ -1530,6 +1544,24 @@ export function createNotifyPlugin(overrides = {}) {
 			readySuppressDedupe.shouldSend(`suppress:${sessionID}`)
 			activeSessions.delete(sessionID)
 			claimRunNotified(ctx.updated, sessionID)
+
+			// A user stop takes priority over whatever network-looking error the
+			// abort teardown throws afterwards — remember it so the follow-up
+			// session.error ("fetch failed: read ECONNRESET") is not announced
+			// as NETWORK INTERRUPTED.
+			if (userCancelled) {
+				lastUserCancel.set(sessionID, now())
+			} else if (isNetwork && lastUserCancel.has(sessionID)) {
+				const sinceCancel = now() - lastUserCancel.get(sessionID)
+				if (sinceCancel >= 0 && sinceCancel < NETWORK_AFTER_CANCEL_MS) {
+					PluginLogger.info("notify", "L2003",
+						"network error {}ms after user-cancel suppressed sessionID={}", sinceCancel, sessionID)
+					// The STOPPED BY YOU toast already fired (or is suppressed by
+					// notifyCancelled:false); do not stack a NETWORK toast on top.
+					return
+				}
+			}
+
 			if (userCancelled && config.notifyCancelled !== false) {
 				send({
 					title: "STOPPED BY YOU",
