@@ -23,6 +23,7 @@ import {
 	buildSnoreToastArgs,
 	parseActivationPayload,
 	substitutePlaceholders,
+	parseJsonc,
 } from "../dist/kdco-notify-win/kdco-notify-win.js"
 
 let passed = 0
@@ -141,6 +142,23 @@ async function main() {
 	})
 	await test("classify non-string -> generic", () => {
 		assert.equal(classifyError(undefined), "generic")
+	})
+
+	console.log("parseJsonc:")
+	await test("parseJsonc strips line and block comments + BOM", () => {
+		const obj = parseJsonc('\uFEFF{\n// line comment\n"a": 1, /* block */ "b": 2\n}')
+		assert.deepEqual(obj, { a: 1, b: 2 })
+	})
+	await test("parseJsonc allows trailing commas", () => {
+		const obj = parseJsonc('{ "a": [1, 2,], "b": {"c": 3,}, }')
+		assert.deepEqual(obj, { a: [1, 2], b: { c: 3 } })
+	})
+	await test("parseJsonc does not strip // or ,} inside string literals", () => {
+		const obj = parseJsonc('{ "url": "https://x/y", "s": "a,}", }')
+		assert.deepEqual(obj, { url: "https://x/y", s: "a,}" })
+	})
+	await test("parseJsonc fails loudly on broken JSON", () => {
+		assert.throws(() => parseJsonc("{ not json }"))
 	})
 
 	console.log("categorizeErrorEvent:")

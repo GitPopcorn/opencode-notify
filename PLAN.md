@@ -236,3 +236,29 @@ opencode-notify/
 - [x] README 更新（clickMode 三态、`-w 0` 示例、logging 配置段、布局树/手动拷贝去 helper）。
 - [ ] 重新部署两处目标并逐字节校验（含 `plugin-logger.js`、无 `jump-to-opencode.ps1` 残留）——下一步。
 - [ ] 提交（分支 `dev`）。
+
+## 12. 配置多级化轮（2026-08-06）：项目级 JSONC 配置高优先级 + 日志诊断就绪
+
+> 用户在「重启后双击 ESC 仍弹 NETWORK INTERRUPT」的现场要求把日志等级提到 ALL，并指出：配置不能只放全局一份。项目级部署的插件应把**项目目录下的配置文件**作为高优先级实现；预期路径 `.opencode/plugin/config/kdco-notify.jsonc`；本仓库对应位置留一份带**每个配置详细注释**的范例。
+
+### 12.1 配置解析（项目优先 + JSONC）
+
+- **优先级**（首个存在的文件生效）：`<cwd>/.opencode/plugin/config/kdco-notify.jsonc` → `.../kdco-notify.json` → `~/.config/opencode/kdco-notify.jsonc` → `~/.config/opencode/kdco-notify.json`。`resolveConfigPath()` 遍历候选；`loadConfig`/`buildLoggingConfigLoader` 统一走它（日志热更新也随之切到项目文件）。
+- **`parseJsonc`**（新导出，4 例测试）：状态机去除 `//`/`/* */` 注释、去除 `}`/`]` 前尾逗号、兼容 UTF-8 BOM；字符串字面量内的 `//`、`,}` 原样保留；坏 JSON 抛出。普通 `.json` 也走同一解析器（无害）。
+
+### 12.2 日志 `enabled` 开关 + 热更新可恢复
+
+- plugin-logger 新增 `enabled`（false ≡ `minLogLevel:"NO"`，不写文件、ERROR 仍落 console 兜底），并重构出幂等 `#ensureDir()`：`init` 全量重置（清 timer/buffer/logDir/initialized）后按等级建目录；热更新从 disabled→enabled 时能补齐目录与 flush 定时器（无需重启即可开 ALL 抓现场）。
+- 新增 `L1002`：启动时记录实际生效的配置文件来源（`config source=... logging.enabled=... minLogLevel=...`）。
+- 新增 2 例 logger 测试：`enabled:false` 零文件、热更新恢复目录。
+
+### 12.3 范例配置
+
+- 本仓库 `.opencode/plugin/config/kdco-notify.jsonc`：**每个配置项**带中文注释（含声音预置、点击三态、日志各档位、心跳参数）；诊断期间 `logging.enabled:true` + `minLogLevel:"ALL"`。
+- `scripts/deploy.ps1`：项目级目标额外把范例拷到 `<target>\.opencode\plugin\config\kdco-notify.jsonc`，仅当目标不存在时写入（不覆盖用户改动）；全局目标不部署配置（沿用全局 `.json`）。
+
+### 12.4 核验
+
+- [x] `node test/notify.test.mjs` **78 passed**（+4 parseJsonc）；`node test/logger.test.mjs` **12 passed**（+2 enabled/热恢复）。
+- [ ] 部署两处目标 + 逐字节校验 + 确认项目目标已带配置；提交。
+- 现场待办：重启后在项目里双击 ESC，读 `%TEMP%\kdcokenny-notify-win\{date}-kdcokenny-notify-win.log` 的 `L2001/L2002`（原始 error payload + 分类）定位为何仍判 NETWORK——若 payload 是「含 aborted 又含连接特征」的 nameless 字符串，`USER_STOP_TEXT_HINTS` 会被网络签名分支盖过，届时按真实字符串调整 hint 优先级。

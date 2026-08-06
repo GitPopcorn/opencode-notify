@@ -47,6 +47,26 @@ if (Test-Path -LiteralPath $leftoverHelper) {
     Write-Host "  removed leftover helper: jump-to-opencode.ps1"
 }
 
+# Project-level config: the annotated example ships to the PROJECT's own
+# `.opencode\plugin\config\kdco-notify.jsonc` (takes priority over the global
+# `~/.config/opencode/kdco-notify.json`). Only written when absent so redeploys
+# never clobber the user's edits. (Global target keeps its global config.)
+if ($Target -ne "global") {
+    $projectRoot = Resolve-Path $Target
+    $configDir = Join-Path $projectRoot ".opencode\plugin\config"
+    $configDest = Join-Path $configDir "kdco-notify.jsonc"
+    $configSrc = Join-Path $repoRoot ".opencode\plugin\config\kdco-notify.jsonc"
+    if (Test-Path $configSrc) {
+        if (-not (Test-Path $configDest)) {
+            New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+            Copy-Item -Force $configSrc $configDest
+            Write-Host "  config:    $configDest (annotated example, logging = ALL)"
+        } else {
+            Write-Host "  config:    $configDest (exists, left untouched)"
+        }
+    }
+}
+
 Write-Host "Done. Restart OpenCode to load the plugin."
 Write-Host "  entry:     $pluginsDir\kdco-notify-win.js"
 Write-Host "  logger:    $pluginsDir\plugin-logger.js"

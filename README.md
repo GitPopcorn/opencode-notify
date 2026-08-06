@@ -97,9 +97,18 @@ A network failure must not be followed by a "READY FOR REVIEW" toast for the sam
 
 ## Configuration (Optional)
 
-Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
+Works out of the box. Config is **JSONC** (comments + trailing commas allowed) and is resolved in priority order:
 
-```json
+| Priority | File | Scope |
+|---|---|---|
+| 1 | `<project>/.opencode/plugin/config/kdco-notify.jsonc` | Project-level (a project-scoped deployment carries its own settings) |
+| 2 | `<project>/.opencode/plugin/config/kdco-notify.json` | Project-level (plain JSON) |
+| 3 | `~/.config/opencode/kdco-notify.jsonc` | Global (all projects) |
+| 4 | `~/.config/opencode/kdco-notify.json` | Global (plain JSON) |
+
+The first existing file wins. An annotated template with **every option documented inline** ships as `.opencode/plugin/config/kdco-notify.jsonc` (deployed to a project target by `scripts/deploy.ps1`, written only if missing so your edits survive redeploys). `logging` hot-reloads on file change; the rest applies on OpenCode restart.
+
+```jsonc
 {
   "notifyChildSessions": false,
   "sounds": {
@@ -122,9 +131,8 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
   "clickProgram": "",
   "clickArgs": [],
   "logging": {
-    "enabled": false,
-    "minLogLevel": "WARN",
-    "dir": ""
+    "enabled": true,
+    "minLogLevel": "ALL"
   },
   "notifyCancelled": true,
   "heartbeat": {
@@ -155,7 +163,7 @@ Notes:
 - **Heartbeat (silent-stop watchdog)** — if a run goes quiet past `stallSec` (default 120s) and then ends **without** any `session.error`/`session.idle` event reaching the plugin, the heartbeat polls the session's real state and backfills a **SESSION ENDED** toast (body notes "not received an end signal"). `warnWhileStalled: true` additionally telegraphs a **SESSION STALLED** warning while a session is *still* running but silent past the stall. This closes the "no notification at all on silent network death" gap that pure event handling can never see. It is on by default.
 - **Click-to-open implementation note** — the click handler reads the activation callback SnoreToast writes to the named pipe (previously that pipe's data was ignored and closed after 1.5s, so clicks did nothing). The pipe is now kept open for the toast's lifetime **only when a click target is configured**; the no-click path is unchanged (1.5s then release).
 - **Precise-tab limitation** — Windows Terminal exposes no stable public CLI to focus an *arbitrary* tab by title. `-w 0` reuses the most recent *window* (whose title mirrors the focused tab); exact per-session tab pinning is best-effort and not guaranteed.
-- **`logging`** — optional Diagnostic file logging. `enabled: true` + `minLogLevel: "ALL"` writes every classified event (`L1001` raw payload, `L2001`/`L2002` error category, `L2010`–`L2012` READY decisions, `L3001`/`L3002` toast dispatch) to `%TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log`. `dir` overrides the folder; `minLogLevel` (`ALL`/`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`NO`, default `WARN`) and `moduleLogLevels` let you gate verbosity. The config is hot-reloaded when the file changes.
+- **`logging`** — optional Diagnostic file logging. `enabled: true` + `minLogLevel: "ALL"` writes every classified event (`L1001` raw payload, `L1002` config source, `L2001`/`L2002` error category, `L2010`–`L2012` READY decisions, `L3001`/`L3002` toast dispatch) to `%TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log`. `logDir` overrides the folder; `enabled: false` (equivalent to `minLogLevel: "NO"`) turns file logging off entirely; `minLogLevel` (`ALL`/`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`NO`, default `WARN`) and `moduleLogLevels` gate verbosity. The `logging` section is hot-reloaded when the config file changes (even from disabled → enabled, no restart needed).
 - `terminal` (optional) overrides terminal auto-detection.
 - **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`).
 - **`showSummary` / `summarySteps`** — for READY notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).

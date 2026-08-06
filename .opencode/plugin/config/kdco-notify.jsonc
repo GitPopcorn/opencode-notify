@@ -1,0 +1,129 @@
+// ============================================================================
+// kdco-notify-win — configuration (JSONC, comments allowed)
+// ============================================================================
+//
+// This file is the PROJECT-LEVEL config. When the plugin is deployed into a
+// project it is expected at `.opencode/plugin/config/kdco-notify.jsonc`
+// relative to the project root, and it takes PRIORITY over the global
+// `~/.config/opencode/kdco-notify.json` (or `.jsonc`).
+//
+// Resolution order (first existing file wins):
+//   1. <project>/.opencode/plugin/config/kdco-notify.jsonc   <- you are here
+//   2. <project>/.opencode/plugin/config/kdco-notify.json
+//   3. ~/.config/opencode/kdco-notify.jsonc
+//   4. ~/.config/opencode/kdco-notify.json
+//
+// Every option is optional — anything you omit keeps its built-in default.
+// The plugin hot-reloads the `logging` section on file change; the rest is
+// read at plugin load (restart OpenCode to apply).
+// ============================================================================
+
+{
+	// Include sub-task (child) sessions in notifications. Default false:
+	// only parent/root sessions notify, so sub-agent work doesn't spam.
+	"notifyChildSessions": false,
+
+	// Per-notification-kind Windows toast sound. Value is a toast preset name
+	// in the `Notification.*` namespace. Bare names (e.g. "Glass", "Basso",
+	// "Submarine") are normalized to Notification.Reminder because SnoreToast
+	// rejects them and shows NO toast at all.
+	"sounds": {
+		"idle": "Notification.Mail",        // session finished -> READY FOR REVIEW
+		"error": "Notification.Reminder",   // session errored -> SOMETHING WENT WRONG
+		"permission": "Notification.SMS",   // permission needed -> WAITING FOR CONFIRMATION
+		"question": "Notification.IM",      // question asked -> QUESTION FOR YOU
+		"network": "Notification.Mail",     // network interruption -> NETWORK INTERRUPTED
+		"cancelled": "Notification.Mail"    // user ESC / stop -> STOPPED BY YOU
+	},
+
+	// Quiet hours: suppress notifications entirely during a window.
+	// start > end means an overnight window (e.g. 22:00 -> 08:00).
+	"quietHours": {
+		"enabled": false,
+		"start": "22:00",
+		"end": "08:00"
+	},
+
+	// Network-interruption errors also play a short system beep (best-effort).
+	"beepOnInterruption": true,
+
+	// Prepend a "[yyyy-MM-dd HH:mm:ss]" timestamp line to the notification body.
+	"showTimestamp": true,
+
+	// Append a one-line summary of the latest tool steps to READY notifications.
+	// false/0 disables.
+	"showSummary": true,
+
+	// Max number of recent tool steps folded into the summary line.
+	"summarySteps": 3,
+
+	// Color each notification theme with a distinct hero banner (green/orange/red/...).
+	"themedIcons": true,
+
+	// Icon set for the toast icon + hero banner: "flat" (full gradient) or
+	// "legacy" (square blue block + thin color border + terminal "≥").
+	"iconTheme": "legacy",
+
+	// Override every kind's sound with one preset. Absolute .wav paths are NOT
+	// supported by SnoreToast and get normalized to Notification.Reminder.
+	"soundOverride": "",
+
+	// What a toast click does. Requires non-empty clickProgram in both
+	// non-"off" modes:
+	//   "off"     -> clicking does nothing (default).
+	//   "program" -> plugin's named-pipe callback spawns clickProgram with
+	//                clickArgs ({{title}}/{{cwd}}/{{sessionID}} placeholders
+	//                supported). e.g. reuse the last Windows Terminal window:
+	//                { "clickProgram": "wt.exe", "clickArgs": ["-w", "0", "-d", "{{cwd}}", "opencode"] }
+	//   "native"  -> pass -application <clickProgram> to SnoreToast, which
+	//                launches it itself (no args, always a brand-new window).
+	"clickMode": "off",
+	"clickProgram": "",
+	"clickArgs": [],
+
+	// Diagnostic file logging via the bundled plugin-logger.
+	// Default %TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log
+	// NOTE: while diagnosing the "ESC shows NETWORK INTERRUPTED" issue this is
+	// set to ALL below so every raw payload + classification decision is
+	// captured (codes L1001/L1002/L2001/L2002/L2010-L2012/L3001/L3002). Dial it
+	// back to "WARN" (or "enabled": false) once the issue is resolved.
+	"logging": {
+		// Master switch. false == minLogLevel "NO" (no file writes at all;
+		// ERROR-level lines still print to the console as a fallback).
+		"enabled": true,
+		// Min severity written to the file: ALL/TRACE/DEBUG/INFO/WARN/ERROR/NO.
+		"minLogLevel": "ALL",
+		// Per-module overrides ({ moduleName: level }); "INHERIT" = global level.
+		"moduleLogLevels": {},
+		// Force a log directory (overrides %TEMP%\kdcokenny-notify-win).
+		"logDir": "",
+		// Delete rotated log files older than this many days.
+		"logRetentionDays": 30,
+		// Flush strategy: "hybrid" (sync every N entries + timer) | "sync".
+		"logFlushMode": "hybrid",
+		// hybrid: sync to disk every N buffered entries.
+		"logSyncCheckpointInterval": 5,
+		// Max buffered entries before a forced flush.
+		"logBufferMaxEntries": 100,
+		// Timer-based flush interval in ms.
+		"logBufferFlushIntervalMs": 500
+	},
+
+	// A run stopped by the user (ESC / cancel) fires a distinct STOPPED BY YOU
+	// toast with its own grey banner. false makes ESC silent.
+	"notifyCancelled": true,
+
+	// Heartbeat watchdog for runs that end without ANY event reaching the
+	// plugin (silent stream death). Polls the session's real state and
+	// backfills a SESSION ENDED toast for a run that reached a terminal state
+	// but was never notified.
+	"heartbeat": {
+		"enabled": true,
+		"intervalSec": 30,   // how often the watchdog checks
+		"stallSec": 120,     // silence past this many seconds -> poll the session
+		// Also telegraph a SESSION STALLED warning while a session is STILL
+		// running but silent past stallSec. Off by default to avoid false
+		// positives on long thinking.
+		"warnWhileStalled": false
+	}
+}

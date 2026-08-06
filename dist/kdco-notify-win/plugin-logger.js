@@ -75,9 +75,24 @@ class PluginLogger {
 	static init(config) {
 		if (!config) { config = {}; }
 
-		// STEP 1: 合并默认值
+		// Full reset so init() can be re-run cleanly (tests / hot re-init):
+		// stale logDir / timer / buffer from a previous init must not leak in.
+		PluginLogger.#initialized = false;
+		PluginLogger.#logDir = null;
+		PluginLogger.#currentDate = null;
+		PluginLogger.#logFilePath = null;
+		PluginLogger.#buffer = [];
+		PluginLogger.#checkpointCounter = 0;
+		if (PluginLogger.#flushTimer) {
+			clearInterval(PluginLogger.#flushTimer);
+			PluginLogger.#flushTimer = null;
+		}
+
+		// STEP 1: 合并默认值。`enabled:false` 等价于 NO（不写任何文件，仅保留 ERROR console 兜底）。
+		const enabled = config.enabled !== false;
 		PluginLogger.#config = {
-			minLogLevel: config.minLogLevel || "WARN",
+			enabled: enabled,
+			minLogLevel: enabled ? (config.minLogLevel || "WARN") : "NO",
 			moduleLogLevels: config.moduleLogLevels || {},
 			logDir: config.logDir || null,
 			logRetentionDays: config.logRetentionDays || 30,
@@ -89,20 +104,25 @@ class PluginLogger {
 		PluginLogger.#configLoader = typeof config.configLoader === "function" ? config.configLoader : null;
 		PluginLogger.#lastConfigVersion = -1;
 
-		// STEP 2: NO 模式 → 不创建目录和文件，仅保留 ERROR console 兜底
-		if (PluginLogger.#config.minLogLevel === "NO") {
-			PluginLogger.#initialized = true;
-			return;
-		}
+		// STEP 2: NO/enabled:false → 不创建目录，仅保留 ERROR console 兜底。(NO 不清 #logDir，便于热更新后恢复)
+		PluginLogger.#ensureDir();
+	}
 
-		// STEP 3: 确定日志目录
+	/**
+	 * 根据当前配置建立日志目录并启动 flush（幂等）。在 init 与热更新(disabled→enabled)
+	 * 时都会调用：若尚未初始化且等级非 NO，则补齐日志目录、清理旧日志、注册 exit flush、
+	 * 启动定时器。初始化为 NO 时不写任何文件，以便之后热更新到可写级别时能原样恢复。
+	 */
+	static #ensureDir() {
+		if (PluginLogger.#initialized) { return; }
+		if (!PluginLogger.#config || PluginLogger.#config.minLogLevel === "NO") { return; }
+
 		PluginLogger.#logDir = PluginLogger.#config.logDir;
 		if (!PluginLogger.#logDir) {
 			const tempBase = process.env.TEMP || process.env.TMP || ".";
 			PluginLogger.#logDir = path.join(tempBase, "kdcokenny-notify-win");
 		}
 
-		// STEP 4: 确保目录存在
 		try {
 			if (!fs.existsSync(PluginLogger.#logDir)) {
 				fs.mkdirSync(PluginLogger.#logDir, { recursive: true });
@@ -111,15 +131,12 @@ class PluginLogger {
 			PluginLogger.#logDir = null;
 		}
 
-		// STEP 5: 清理旧日志
 		if (PluginLogger.#logDir && PluginLogger.#config.logRetentionDays > 0) {
 			PluginLogger.#cleanupOldLogs();
 		}
 
-		// STEP 6: 标记已初始化
 		PluginLogger.#initialized = true;
 
-		// STEP 7: 注册进程退出 flush (只注册一次)
 		if (!PluginLogger.#exitFlushRegistered) {
 			PluginLogger.#exitFlushRegistered = true;
 			process.on("exit", function () {
@@ -127,7 +144,6 @@ class PluginLogger {
 			});
 		}
 
-		// STEP 8: 启动定时器
 		if (PluginLogger.#logDir) {
 			PluginLogger.#scheduleFlush();
 		}
@@ -151,8 +167,13 @@ class PluginLogger {
 		const lc = current.config;
 		if (lc) {
 			const oldLevel = PluginLogger.#config.minLogLevel;
-			PluginLogger.#config.minLogLevel = lc.minLogLevel || "WARN";
+			PluginLogger.#config.enabled = lc.enabled !== false;
+			PluginLogger.#config.minLogLevel = PluginLogger.#config.enabled ? (lc.minLogLevel || "WARN") : "NO";
 			PluginLogger.#config.moduleLogLevels = lc.moduleLogLevels || {};
+			// disabled→enabled 的热更新：补齐此前的日志目录初始化
+			if (PluginLogger.#config.minLogLevel !== "NO") {
+				PluginLogger.#ensureDir();
+			}
 			if (oldLevel && oldLevel !== PluginLogger.#config.minLogLevel) {
 				if (PluginLogger.#isLevelEnabled("plugin-logger", "WARN")) {
 					const logFilePath = PluginLogger.getLogFilePath();

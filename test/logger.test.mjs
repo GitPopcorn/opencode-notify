@@ -128,6 +128,39 @@ async function main() {
 		assert.equal(entries.length, 0, "no files created at NO level")
 	})
 
+	await test("enabled:false acts like NO (no file written)", async () => {
+		const dir = makeTempDir()
+		PluginLogger.init({ enabled: false, minLogLevel: "ALL", logDir: dir })
+		PluginLogger.info("m", "L", "not-written")
+		PluginLogger.flush()
+		const entries = fs.readdirSync(dir)
+		assert.equal(entries.length, 0, "enabled:false writes no file even with ALL")
+	})
+
+	await test("hot-reload can enable from disabled and recover the log dir", async () => {
+		const dir = makeTempDir()
+		let version = 1
+		let loaderConfig = { enabled: false, minLogLevel: "NO" }
+		PluginLogger.init({
+			enabled: false,
+			minLogLevel: "NO",
+			logDir: dir,
+			configLoader: () => ({ version, config: loaderConfig }),
+		})
+		PluginLogger.info("m", "L", "disabled-line")
+		PluginLogger.flush()
+		assert.equal(fs.readdirSync(dir).length, 0, "nothing written while disabled")
+
+		loaderConfig = { enabled: true, minLogLevel: "ALL" }
+		version = 2
+		PluginLogger.info("m", "L", "now-logging")
+		PluginLogger.flush()
+		const entries = fs.readdirSync(dir)
+		assert.ok(entries.length > 0, "log file appears after hot-reload enable")
+		const content = fs.readFileSync(PluginLogger.getLogFilePath(), "utf8")
+		assert.ok(content.includes("now-logging"), "line written after hot-reload enable")
+	})
+
 	await test("moduleLogLevels override can raise one module", async () => {
 		const dir = makeTempDir()
 		PluginLogger.init({ minLogLevel: "ERROR", moduleLogLevels: { noisy: "ALL" }, logDir: dir })

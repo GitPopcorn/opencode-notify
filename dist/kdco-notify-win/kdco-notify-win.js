@@ -21,7 +21,14 @@
  *   2. `cd kdco-notify-win && npm install`   (vendors node-notifier + detect-terminal into node_modules)
  *   3. Restart OpenCode.
  *
- * Config file: `~/.config/opencode/kdco-notify.json` (see README / DEFAULT_CONFIG below).
+ * Config file (JSONC with comments, see README / DEFAULT_CONFIG below). Resolved
+ * in priority order:
+ *   1. `<project>/.opencode/plugin/config/kdco-notify.jsonc`  (project-level, high priority)
+ *   2. `<project>/.opencode/plugin/config/kdco-notify.json`
+ *   3. `~/.config/opencode/kdco-notify.jsonc`                (global)
+ *   4. `~/.config/opencode/kdco-notify.json`
+ * An annotated template with every option documented ships as
+ * `.opencode/plugin/config/kdco-notify.jsonc`.
  */
 
 import * as fs from "node:fs/promises"
@@ -62,16 +69,17 @@ function safeStringify(value, maxChars = 2000) {
 
 /**
  * Build a synchronous config-loader for PluginLogger that hot-reloads the
- * `logging` section of kdco-notify.json whenever the file changes (mtime).
+ * `logging` section of the resolved config file whenever it changes (mtime).
  * @returns {{version:number, config:object}|null}
  */
 function buildLoggingConfigLoader() {
 	return () => {
+		const configPath = resolveConfigPath()
+		if (!configPath) return null
 		try {
-			const stat = fsSync.statSync(CONFIG_PATH())
-			let content = fsSync.readFileSync(CONFIG_PATH(), "utf8")
-			if (content.charCodeAt(0) === 0xfeff) content = content.slice(1)
-			const userConfig = JSON.parse(content)
+			const stat = fsSync.statSync(configPath)
+			let content = fsSync.readFileSync(configPath, "utf8")
+			const userConfig = parseJsonc(content)
 			const logging = { ...DEFAULT_CONFIG.logging, ...(userConfig.logging ?? {}) }
 			return { version: stat.mtimeMs, config: logging }
 		} catch {
@@ -620,6 +628,8 @@ const DEFAULT_CONFIG = {
 	 * and toast decisions.
 	 */
 	logging: {
+		/** Master switch. false == "NO" (no file writes at all, ERROR still prints to console). */
+		enabled: true,
 		/** Min severity that is written to the file: ALL/TRACE/DEBUG/INFO/WARN/ERROR/NO. */
 		minLogLevel: "WARN",
 		/** Per-module overrides ({moduleName: level}) — "INHERIT" means the global. */
@@ -660,16 +670,79 @@ const DEFAULT_CONFIG = {
 	},
 }
 
-const CONFIG_PATH = () => path.join(os.homedir(), ".config", "opencode", "kdco-notify.json")
+// Project-level config lives under the project's own `.opencode/plugin/config/`
+// (high priority over the global one) so a project-scoped deployment can carry
+// its own settings without touching `~/.config/opencode/`.
+const GLOBAL_CONFIG_JSONC = () => path.join(os.homedir(), ".config", "opencode", "kdco-notify.jsonc")
+const GLOBAL_CONFIG_JSON = () => path.join(os.homedir(), ".config", "opencode", "kdco-notify.json")
+const PROJECT_CONFIG_DIR = () => path.join(process.cwd(), ".opencode", "plugin", "config")
+const PROJECT_CONFIG_JSONC = () => path.join(PROJECT_CONFIG_DIR(), "kdco-notify.jsonc")
+const PROJECT_CONFIG_JSON = () => path.join(PROJECT_CONFIG_DIR(), "kdco-notify.json")
+
+/**
+ * Resolve which config file to load. Project-level `.opencode/plugin/config/`
+ * beats the global `~/.config/opencode/`; `.jsonc` is preferred over `.json`
+ * so a commented example never gets shadowed by an empty file. Returns null
+ * when no config file exists anywhere (pure defaults).
+ * @returns {string|null}
+ */
+export function resolveConfigPath() {
+	const candidates = [PROJECT_CONFIG_JSONC(), PROJECT_CONFIG_JSON(), GLOBAL_CONFIG_JSONC(), GLOBAL_CONFIG_JSON()]
+	for (const candidate of candidates) {
+		if (fsSync.existsSync(candidate)) return candidate
+	}
+	return null
+}
+
+/**
+ * Parse JSONC (comments + trailing commas + optional UTF-8 BOM) into a value.
+ * `//` line comments and block comments (slash-star ... star-slash) plus
+ * trailing commas before a closing brace/bracket are stripped WITHOUT touching
+ * them inside string literals, then the remainder is JSON.parse'd.
+ * @param {string} content
+ * @returns {any}
+ */
+export function parseJsonc(content) {
+	if (content.charCodeAt(0) === 0xfeff) content = content.slice(1)
+	let out = ""
+	let i = 0
+	let inString = false
+	while (i < content.length) {
+		const c = content[i]
+		const next = content[i + 1]
+		if (inString) {
+			if (c === '"') { inString = false; out += c; i++; continue }
+			if (c === "\\") { out += c + (next ?? ""); i += 2; continue }
+			out += c; i++; continue
+		}
+		if (c === '"') { inString = true; out += c; i++; continue }
+		if (c === "/" && next === "/") {
+			while (i < content.length && content[i] !== "\n") i++
+			continue
+		}
+		if (c === "/" && next === "*") {
+			i += 2
+			while (i < content.length && !(content[i] === "*" && content[i + 1] === "/")) i++
+			i = Math.min(i + 2, content.length)
+			continue
+		}
+		if (c === ",") {
+			let j = i + 1
+			while (j < content.length && /[\s\r\n\t]/.test(content[j])) j++
+			if (content[j] === "}" || content[j] === "]") { i++; continue }
+			out += c; i++; continue
+		}
+		out += c; i++
+	}
+	return JSON.parse(out)
+}
 
 async function loadConfig() {
+	const configPath = resolveConfigPath()
+	if (!configPath) return { ...DEFAULT_CONFIG }
 	try {
-		let content = await fs.readFile(CONFIG_PATH(), "utf8")
-		// PowerShell's Set-Content -Encoding UTF8 writes a BOM; JSON.parse
-		// rejects it. Strip any leading BOM so a config written by Windows
-		// tools is still honored instead of silently falling back to defaults.
-		if (content.charCodeAt(0) === 0xfeff) content = content.slice(1)
-		const userConfig = JSON.parse(content)
+		let content = await fs.readFile(configPath, "utf8")
+		const userConfig = parseJsonc(content)
 		return {
 			...DEFAULT_CONFIG,
 			...userConfig,
@@ -680,7 +753,7 @@ async function loadConfig() {
 		}
 	} catch {
 		// Missing or invalid config -> defaults
-		return DEFAULT_CONFIG
+		return { ...DEFAULT_CONFIG }
 	}
 }
 
@@ -1223,6 +1296,7 @@ export function createNotifyPlugin(overrides = {}) {
 		// running writes almost nothing; set logging.minLogLevel:"ALL" to capture
 		// raw payloads + decisions as you debug.
 		PluginLogger.init({ ...DEFAULT_CONFIG.logging, ...(config.logging ?? {}), configLoader: buildLoggingConfigLoader() })
+		PluginLogger.info("notify", "L1002", "config source={} logging.enabled={} minLogLevel={}", resolveConfigPath() ?? "(defaults, no file)", config.logging?.enabled, config.logging?.minLogLevel)
 
 		const dedupeStore = createSharedDedupeStore(dedupeStorePath)
 		const questionDedupe = createDedupe(dedupeStore)
