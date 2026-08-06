@@ -57,17 +57,18 @@ function makeSessionClient(parentID) {
 	return {
 		session: {
 			get: async ({ path: { id } }) => sessions.get(id) ?? { data: null },
+			// A normally-completed run always ends on an assistant message.
 			messages: async ({ path: { id } }) => [
+				{
+					info: { id: `${id}-m2`, role: "user" },
+					parts: [{ type: "text", text: "hi" }],
+				},
 				{
 					info: { id: `${id}-m1`, role: "assistant" },
 					parts: [
 						{ type: "tool", tool: "read", state: { title: "Read file /a.txt" } },
 						{ type: "tool", tool: "bash", state: { title: "Bash ls" } },
 					],
-				},
-				{
-					info: { id: `${id}-m2`, role: "user" },
-					parts: [{ type: "text", text: "hi" }],
 				},
 			],
 		},
@@ -574,6 +575,87 @@ async function main() {
 				get: async () => ({ data: { title: "T", parentID: null } }),
 				messages: async () => [
 					{ info: { id: "m1", role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
+	})
+
+	await test("getLastRunOutcome -> aborted when timeline ends on a user message (early-ESC, no assistant output)", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "run this" }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
+	})
+
+	await test("getLastRunOutcome -> complete still when final assistant part is clean (no regression)", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "run this" }] },
+					{ info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
+	})
+
+	await test("getLastRunOutcome -> aborted on empty assistant message with message-level MessageAbortedError", async () => {
+		// Real fast-ESC shape (L2DIAG 2026-08-06): the interrupted run's last
+		// assistant message has ZERO parts; the interrupt is only visible as the
+		// message-level info.error.
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "run this" }] },
+					{ info: { id: "a1", role: "assistant", error: { name: "MessageAbortedError", data: { message: "Aborted" } } }, parts: [] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
+	})
+
+	await test("getLastRunOutcome -> error on message-level non-abort error", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "a1", role: "assistant", error: { name: "FetchError", message: "fetch failed" } }, parts: [] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "error")
+	})
+
+	await test("getLastRunOutcome -> aborted on part-level MessageAbortedError (prefix match)", async () => {
+		// "MessageAbortedError" = "aborted"+"error": the legacy ABORT_ERROR_NAMES
+		// "aborterror" entry misses it, so the prefix "abort" match must catch it
+		// at the part level too.
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "a1", role: "assistant" }, parts: [{ type: "text", state: { error: { name: "MessageAbortedError", message: "Aborted" } } }] },
+				],
+			},
+		}
+		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
+	})
+
+	await test("getLastRunOutcome -> complete on empty assistant message with no error (no brittle guess)", async () => {
+		const client = {
+			session: {
+				get: async () => ({ data: { title: "T", parentID: null } }),
+				messages: async () => [
+					{ info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
+					{ info: { id: "a1", role: "assistant" }, parts: [] },
 				],
 			},
 		}

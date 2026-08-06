@@ -982,6 +982,23 @@ const ABORT_ERROR_NAMES = [
 	"error.interrupt",
 ]
 
+/**
+ * Decide whether an assistant message/part error represents a user/runtime stop
+ * rather than a genuine failure. Mirrors `categorizeErrorEvent`'s abort-name
+ * logic: a prefix match on "abort" catches `MessageAbortedError` =
+ * "aborted" + "error" (which the legacy `ABORT_ERROR_NAMES` "aborterror" entry
+ * misses), plus the explicit user-stop names.
+ * @param {{name?: unknown}|undefined} error
+ * @returns {"aborted"|"error"}
+ */
+function classifyAssistantError(error) {
+	const name = String(error?.name ?? "").toLowerCase()
+	if (name.includes("abort")) return "aborted"
+	if (USER_STOP_ERROR_NAMES.some((n) => name.includes(n))) return "aborted"
+	if (ABORT_ERROR_NAMES.some((n) => name.includes(n))) return "aborted"
+	return "error"
+}
+
 /** Play a short system beep via PowerShell (best-effort, Windows). */
 function playInterruptionBeep(beep = true) {
 	if (!beep || process.platform !== "win32") return
@@ -1142,19 +1159,38 @@ export async function getLastRunOutcome(client, sessionID) {
 
 /** Pure version of the outcome classifier, used when items are already loaded. */
 function lastRunOutcomeFromMessages(items) {
+	// A run aborted before the model produced any output (e.g. ESC before it
+	// started thinking) leaves the timeline trailing on a user/tool message
+	// with no assistant reply. That is not a completed run: classify it as
+	// "aborted" so it announces STOPPED BY YOU instead of a bogus READY.
+	if (items.length > 0) {
+		const tail = items[items.length - 1]
+		const tailInfo = tail?.info ?? tail
+		const tailRole = tailInfo?.role ?? tail?.role
+		if (tailRole && tailRole !== "assistant") return "aborted"
+	}
 	// Scan from the newest message for the last assistant message with parts.
 	for (let i = items.length - 1; i >= 0; i--) {
 		const item = items[i]
 		const info = item?.info ?? item
 		const role = info?.role ?? item?.role
 		if (role !== "assistant") continue
+
+		// Message-level error: OpenCode writes an interrupt as `info.error`
+		// (e.g. MessageAbortedError) on the assistant message itself, even when
+		// no part carries it. Check it BEFORE the per-part scan so an empty
+		// aborted assistant message (nParts=0) is still classified correctly.
+		const msgErr = info?.error
+		if (msgErr) {
+			return classifyAssistantError(msgErr) === "aborted" ? "aborted" : "error"
+		}
+
 		const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
 		for (let j = parts.length - 1; j >= 0; j--) {
 			const part = parts[j]
 			const state = part?.state
 			if (state?.error) {
-				const name = String(state.error?.name ?? "").toLowerCase()
-				if (ABORT_ERROR_NAMES.some((n) => name.includes(n))) return "aborted"
+				if (classifyAssistantError(state.error) === "aborted") return "aborted"
 				return "error"
 			}
 			const st = String(state?.status ?? state?.state ?? state?.type ?? "").toLowerCase()
