@@ -460,13 +460,11 @@ export function buildSnoreToastArgs(opts, banner, pipePath, includePipe) {
 	const sound = normalizeToastSound(opts.sound)
 	if (sound) args.push("-s", sound)
 	if (includePipe) args.push("-pipeName", pipePath)
-	if (opts.clickProgram) {
-		// SnoreToast launches this program when the toast is activated.
-		args.push("-application", opts.clickProgram)
-		if (Array.isArray(opts.clickArgs) && opts.clickArgs.length) {
-			args.push("-la", opts.clickArgs.join(" "))
-		}
-	}
+	// NOTE: we deliberately do NOT forward click-to-open (-application / -la).
+	// The vendored SnoreToast fork's parser does not understand `-la` — it
+	// prints its usage banner and exits -1, so the toast is never displayed at
+	// all. Activation is handled entirely by our own named-pipe callback
+	// (spawnClick), which is why no `-application` is needed either.
 	return args
 }
 
@@ -725,6 +723,72 @@ export function classifyError(rawError) {
 	if (NETWORK_ERROR_HINTS.some((hint) => text.includes(hint))) return "network-interruption"
 
 	return "generic"
+}
+
+/**
+ * Message signatures that explicitly name the USER as the source of the abort,
+ * as opposed to an implicit network / mid-stream disconnect.
+ */
+const USER_ABORT_MESSAGE_HINTS = [
+	"user aborted",
+	"aborted by the user",
+	"aborted by user",
+	"user stopped",
+	"stopped by the user",
+	"user interrupted",
+	"interrupted by the user",
+	"aborted a request",
+	"cancelled by the user",
+	"canceled by the user",
+]
+
+/** Error names that unambiguously mean the user/runtime stopped the run on purpose. */
+const USER_STOP_ERROR_NAMES = [
+	"userinterrupt",
+	"userinterrupted",
+	"userabort",
+	"useraborted",
+	"stoperror",
+	"stoprequested",
+	"interrupted",
+	"interruptederror",
+	"cancelled",
+	"canceled",
+	"error.interrupt",
+]
+
+/**
+ * Categorize a `session.error` payload into a notification category.
+ *
+ * A manual ESC / user interrupt surfaces as a `session.error` event (a bare
+ * AbortError), NOT as `session.idle`, so this is the primary path for the
+ * STOPPED BY YOU toast. The error NAME decides first: a user-stop name or a
+ * message that names the user wins over the "aborted" text hint that would
+ * otherwise mislabel the interrupt as a network drop.
+ *
+ * @param {unknown} error raw payload (string or Error-like object)
+ * @returns {"user-cancel"|"network-interruption"|"http-error"|"generic"}
+ */
+export function categorizeErrorEvent(error) {
+	if (error === undefined || error === null) return "generic"
+
+	const name = String(error?.name ?? "").toLowerCase()
+	const text = (extractErrorMessage(error) ?? "").toLowerCase()
+
+	// Explicit user-stop name beats everything.
+	if (USER_STOP_ERROR_NAMES.some((n) => name.includes(n))) return "user-cancel"
+	// Message that names the user as the abort source.
+	if (USER_ABORT_MESSAGE_HINTS.some((hint) => text.includes(hint))) return "user-cancel"
+
+	// A bare AbortError ("This operation was aborted") is the classic manual
+	// interrupt. Genuine network aborts still carry a connection signature.
+	if (name.includes("aborterror")) {
+		const explicitNetwork = NETWORK_ERROR_HINTS.some((hint) => hint !== "aborted" && text.includes(hint))
+		return explicitNetwork ? "network-interruption" : "user-cancel"
+	}
+
+	// Everything else falls back to message heuristics.
+	return classifyError(text)
 }
 
 /**
@@ -1234,11 +1298,13 @@ export function createNotifyPlugin(overrides = {}) {
 			if (!(await shouldNotifyParent(sessionID))) return
 			if (isQuietHours(config)) return
 
-			const kind = classifyError(rawError)
-			const isNetwork = kind === "network-interruption" || kind === "http-error"
+			const category = categorizeErrorEvent(rawError)
+			const userCancelled = category === "user-cancel"
+			const isNetwork = category === "network-interruption" || category === "http-error"
 
-			const message = rawError?.slice(0, 100) || "Something went wrong"
-			const body = await composeMessage({ kind: "error", title: message })
+			const text = extractErrorMessage(rawError)
+			const message = (text ?? "").slice(0, 100) || "Something went wrong"
+			const body = await composeMessage({ kind: userCancelled ? "cancelled" : "error", title: message })
 			const ctx = await getSessionContext(client, sessionID)
 			// A failed session should NOT also announce "ready" moments later.
 			// Mark the same session's ready key as recently-sent so any idle event
@@ -1246,6 +1312,17 @@ export function createNotifyPlugin(overrides = {}) {
 			readyDedupe.shouldSend(`ready:${sessionID}`)
 			activeSessions.delete(sessionID)
 			claimRunNotified(ctx.updated, sessionID)
+			if (userCancelled && config.notifyCancelled !== false) {
+				send({
+					title: "STOPPED BY YOU",
+					message: body,
+					sound: config.sounds.cancelled ?? config.sounds.idle,
+					theme: "cancelled",
+					...notifyExtras({ ...ctx, sessionID }),
+				})
+				return
+			}
+			if (userCancelled) return
 			if (isNetwork) {
 				send({
 					title: "NETWORK INTERRUPTED",
@@ -1405,17 +1482,26 @@ export function createNotifyPlugin(overrides = {}) {
 
 		return {
 			"tool.execute.before": async (input) => {
-				if (input?.sessionID) markActive(String(input.sessionID))
-				if (input?.tool === "question") {
-					const key = `${input?.sessionID}:${input?.callID}`
-					if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
+				try {
+					if (input?.sessionID) markActive(String(input.sessionID))
+					if (input?.tool === "question") {
+						const key = `${input?.sessionID}:${input?.callID}`
+						if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
+					}
+				} catch (err) {
+					console.warn("[kdco-notify-win] tool.execute.before error:", err)
 				}
 			},
 			event: async ({ event }) => {
-				const type = event?.type
-				const props = event?.properties ?? {}
+				// Wrap EVERYTHING in try/catch: an await that rejects here becomes
+				// an unhandledRejection, which (Node 15+) terminates the whole
+				// OpenCode CLI process. Swallow + log so a flaky session fetch or
+				// a plugin bug can never crash the shell.
+				try {
+					const type = event?.type
+					const props = event?.properties ?? {}
 
-				switch (type) {
+					switch (type) {
 					case "session.status": {
 						// session.status fires for BOTH busy and idle transitions.
 						// Track busy activity for the heartbeat; notify only on idle.
@@ -1444,9 +1530,8 @@ export function createNotifyPlugin(overrides = {}) {
 					}
 					case "session.error": {
 						const id = toId(props?.sessionID)
-						const raw = extractErrorMessage(props?.error)
 						if (id && errorDedupe.shouldSend(`error:${id}`)) {
-							await handleSessionError(id, raw)
+							await handleSessionError(id, props?.error)
 						}
 						break
 					}
@@ -1461,6 +1546,9 @@ export function createNotifyPlugin(overrides = {}) {
 						if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
 						break
 					}
+					}
+				} catch (err) {
+					console.warn("[kdco-notify-win] event handler error:", err)
 				}
 			},
 			// Exposed for tests (and harmless to OpenCode, which ignores it).

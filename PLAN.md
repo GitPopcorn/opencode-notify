@@ -183,3 +183,25 @@ opencode-notify/
 - [x] 默认无点击路径字节级不变；`node test/notify.test.mjs` 56 项全绿（含管道点击集成、outcome 分类、超窗抑制、CANCELLED、心跳补发/不补发/跨实例去重、占位符）。
 - [x] `scripts/deploy.ps1` 增加复制 `jump-to-opencode.ps1`。
 - 已知问题（暂不排查）：一次 `INTERNET INTERRUPT` 未通知，最近一次 NETWORK toast 为 12:00:00；已记录，与心跳方向相关。
+
+## 10. 部署回归轮（2026-08-06）：`-la` 致命参数 + 事件处理器崩溃 + ESC 误报 NETWORK
+
+> 部署后实测发现三个回归，全部修复，测试 66 项全绿。
+
+### 10.1 通知不弹 + CLI 打印 SnoreToast 帮助手册（根因：`-la`）
+
+- **实测**：逐参数探测 vendored `snoretoast-x64.exe`：`-appID/-t/-m/-p/-s/-pipeName/-application` 均 OK；一旦带 `-la` → 退出码 `-1`（0xFFFFFFFF），且解析器打印 usage 帮助。`execFileSync` 下 exit `null`=0 成功、`4294967295`=-1 失败。
+- **为什么影响所有通知**：默认 `clickMode:"helper"` 总配置 clickArgs → `buildSnoreToastArgs` 总拼接 `-application ... -la <args>` → 每条通知都触发 SnoreToast 解析失败 → 从不显示 toast，只弹帮助。
+- **修复**：`buildSnoreToastArgs` 不再向 SnoreToast 转发 `-application`/`-la`。点击激活完全由插件自己的命名管道回调（`spawnClick`）承担，SnoreToast 只接收安全参数子集。
+
+### 10.2 连续 ESC 让 OpenCode CLI 闪退（根因：unhandledRejection）
+
+- `event` 与 `tool.execute.before` 处理器是 async，内部 `await`（session fetch / composeMessage 等）一旦 reject 即成为 unhandledRejection —— Node 15+ 默认 unhandled-rejections 会**终止整个进程**。连续 ESC 并发触发 `session.error` 显著提高命中概率。
+- **修复**：两个处理器整体包 try/catch，任何异常 log + 吞掉，永不外抛；heartbeat 定时器原本已有 `.catch()`。
+
+### 10.3 ESC 误报 NETWORK INTERRUPTED（根因：错误分类顺序）
+
+- 手动 ESC 走 `session.error`（裸 `AbortError`），其消息含 "aborted" → 旧 `classifyError` 先命中 `NETWORK_ERROR_HINTS` → 标为 network → 弹 NETWORK。
+- **修复**：新增 `categorizeErrorEvent(error)`，**先按错误名判定**（`AbortError`/`UserInterrupt`/明说 user 的消息 → `user-cancel`），再对裸 `AbortError` 做「消息是否带连接特征」细分；仅当无中止特征时才落到原有消息启发式。`handleSessionError` 按类别路由：user-cancel → **STOPPED BY YOU**（灰 banner，`notifyCancelled:false` 时静默）；network/http → NETWORK INTERRUPTED/SOMETHING WENT WRONG；generic → SOMETHING WENT WRONG。
+- 注意边界：真实网络中断若以「裸 AbortError 且无连接特征」形式到达，会被当作 user-cancel（尽力而为，README 已注明）。
+- **测试**：新增 `categorizeErrorEvent` 6 例 + session.error 集成 4 例（AbortError→STOPPED BY YOU、user 消息→STOPPED BY YOU、notifyCancelled:false 静默、generic→SOMETHING WENT WRONG）；`buildSnoreToastArgs` 断言改为「不转发 -application/-la」；点击集成测试改用轮询等待（Windows 命名管道回调在套件环境下可能被推迟数秒，2000ms 断言改为 15s 窗口）。共 **66 passed, 0 failed**。

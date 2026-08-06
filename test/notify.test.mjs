@@ -15,6 +15,7 @@ import * as net from "node:net"
 import {
 	createNotifyPlugin,
 	classifyError,
+	categorizeErrorEvent,
 	formatTimestamp,
 	buildStepSummary,
 	getLastRunOutcome,
@@ -142,6 +143,31 @@ async function main() {
 		assert.equal(classifyError(undefined), "generic")
 	})
 
+	console.log("categorizeErrorEvent:")
+	await test("categorize bare AbortError -> user-cancel", () => {
+		assert.equal(categorizeErrorEvent({ name: "AbortError", message: "This operation was aborted" }), "user-cancel")
+	})
+	await test("categorize user-abort message -> user-cancel", () => {
+		assert.equal(categorizeErrorEvent("The user aborted a request."), "user-cancel")
+		assert.equal(categorizeErrorEvent({ name: "Error", message: "Request was aborted by the user" }), "user-cancel")
+	})
+	await test("categorize UserInterrupt name -> user-cancel", () => {
+		assert.equal(categorizeErrorEvent({ name: "UserInterrupt" }), "user-cancel")
+	})
+	await test("categorize AbortError with network signature -> network", () => {
+		assert.equal(
+			categorizeErrorEvent({ name: "AbortError", message: "aborted request to provider: fetch failed read ECONNRESET" }),
+			"network-interruption",
+		)
+	})
+	await test("categorize network message -> network", () => {
+		assert.equal(categorizeErrorEvent("fetch failed: read ECONNRESET"), "network-interruption")
+	})
+	await test("categorize generic -> generic", () => {
+		assert.equal(categorizeErrorEvent({ name: "Error", message: "division by zero" }), "generic")
+		assert.equal(categorizeErrorEvent(undefined), "generic")
+	})
+
 	console.log("plugin behaviors:")
 	await test("session.idle notifies parent with title", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
@@ -182,6 +208,49 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 		assert.equal(h.beeps.length, 1)
+	})
+
+	await test("manual ESC (AbortError) -> STOPPED BY YOU cancelled toast", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: {
+				type: "session.error",
+				properties: { sessionID: "parent", error: { name: "AbortError", message: "This operation was aborted" } },
+			},
+		})
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].theme, "cancelled")
+		assert.equal(h.beeps.length, 0)
+	})
+
+	await test("user-abort message -> STOPPED BY YOU toast", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.error", properties: { sessionID: "parent", error: "The user aborted a request." } },
+		})
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].theme, "cancelled")
+	})
+
+	await test("notifyCancelled:false suppresses STOPPED BY YOU toast", async () => {
+		const cfg = { ...baseConfig(), notifyCancelled: false }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({
+			event: { type: "session.error", properties: { sessionID: "parent", error: { name: "AbortError" } } },
+		})
+		assert.equal(h.sent.length, 0)
+	})
+
+	await test("generic session.error remains SOMETHING WENT WRONG", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.error", properties: { sessionID: "parent", error: { name: "Error", message: "division by zero" } } },
+		})
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
+		assert.equal(h.sent[0].theme, "error")
 	})
 
 	await test("quiet hours suppress notification", async () => {
@@ -579,9 +648,24 @@ async function main() {
 			{ title: "T", message: "M", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] },
 			{ platform: "win32", snoreToastExe: "C:\\snoretoast.exe", spawn },
 		)
-		await new Promise((r) => setTimeout(r, 80))
+		const waitFor = async (cond, ms) => {
+			const deadline = Date.now() + ms
+			while (Date.now() < deadline) {
+				if (cond()) return true
+				await new Promise((r) => setTimeout(r, 15))
+			}
+			return false
+		}
+		// Wait until SnoreToast was spawned — the pipe server listens first, so
+		// this is our signal that the pipe accepts connections.
+		// Wait until SnoreToast was spawned — the pipe server listens first, so
+		// this doubles as our readiness signal that the pipe accepts connects.
+		// Use a wide window: sibling toast tests also open named-pipe servers, and
+		// on Windows their pending I/O can delay this callback by ~seconds.
+		assert.ok(await waitFor(() => spawned.length >= 1, 15000), "snoretoast should be spawned")
 		const snore = spawned[0]
 		const pipePath = snore.args[snore.args.indexOf("-pipeName") + 1]
+		assert.ok(pipePath, "snoretoast args should include a -pipeName")
 		// Simulate the user clicking the toast: SnoreToast writes utf16le activation.
 		await new Promise((resolve) => {
 			const sock = net.connect(pipePath, () => {
@@ -589,18 +673,18 @@ async function main() {
 				sock.end()
 			})
 			sock.on("error", () => resolve())
-			setTimeout(resolve, 120)
+			setTimeout(resolve, 500)
 		})
-		await new Promise((r) => setTimeout(r, 100))
-		assert.ok(spawned.length >= 2, "click should spawn the click program")
+		assert.ok(await waitFor(() => spawned.length >= 2, 2000), "click should spawn the click program")
 		assert.equal(spawned[1].cmd, "wt.exe")
+		assert.deepEqual(spawned[1].args, ["-d", ".", "opencode"])
 		// Close the pipe server promptly by firing the child exit handler.
 		if (childHandlers.exit) childHandlers.exit(0)
 		await new Promise((r) => setTimeout(r, 20))
 	})
 
 	console.log("self-hosted SnoreToast sender:")
-	await test("buildSnoreToastArgs includes -pipeName alongside -application + custom sound", async () => {
+	await test("buildSnoreToastArgs includes -pipeName but does NOT forward click args", async () => {
 		const args = buildSnoreToastArgs(
 			{
 				title: "T",
@@ -614,14 +698,16 @@ async function main() {
 			"\\\\.\\pipe\\notifierPipe-abc",
 			true,
 		)
-		// Everything node-notifier's whitelist would allow AND what it drops.
 		assert.ok(args.includes("-pipeName"), "args should include -pipeName")
-		assert.ok(args.includes("-application"), "args should include -application")
-		assert.ok(args.includes("-la"), "args should include -la")
 		assert.ok(args.includes("-p"), "args should include -p")
 		assert.ok(args.includes("-appID"), "args should include -appID")
 		assert.ok(args.includes("C:\\banner.png"), "banner should pass through")
-		assert.ok(args.includes("wt.exe"), "click program should pass through")
+		// The vendored SnoreToast fork prints usage + exits -1 when it receives
+		// `-la` (so no toast shows), so click args must NEVER be forwarded.
+		// Click-to-open is handled solely by our own named-pipe callback.
+		assert.ok(!args.includes("-application"), "must not forward -application to SnoreToast")
+		assert.ok(!args.includes("-la"), "must not forward -la to SnoreToast")
+		assert.ok(!args.includes("wt.exe"), "click program must not reach SnoreToast")
 		assert.equal(args[args.indexOf("-pipeName") + 1], "\\\\.\\pipe\\notifierPipe-abc")
 	})
 
