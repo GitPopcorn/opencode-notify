@@ -33,6 +33,52 @@ import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import * as net from "node:net"
 import { randomUUID } from "node:crypto"
+import PluginLogger from "./plugin-logger.js"
+
+// ==========================================
+// LOGGING (generic plugin-logger, default WARN)
+// ==========================================
+
+/**
+ * Safe stringify for arbitrary event payloads that might contain circular
+ * references or huge object graphs. Truncated so a pathological payload can't
+ * flood the log file.
+ * @param {unknown} value
+ * @param {number} [maxChars=2000]
+ * @returns {string}
+ */
+function safeStringify(value, maxChars = 2000) {
+	if (value === undefined) return "undefined"
+	if (value === null) return "null"
+	if (typeof value === "string") return value.slice(0, maxChars)
+	try {
+		const json = JSON.stringify(value)
+		if (json === undefined) return String(value)
+		return json.length > maxChars ? json.slice(0, maxChars) + "…" : json
+	} catch {
+		try { return String(value) } catch { return "[unprintable]" }
+	}
+}
+
+/**
+ * Build a synchronous config-loader for PluginLogger that hot-reloads the
+ * `logging` section of kdco-notify.json whenever the file changes (mtime).
+ * @returns {{version:number, config:object}|null}
+ */
+function buildLoggingConfigLoader() {
+	return () => {
+		try {
+			const stat = fsSync.statSync(CONFIG_PATH())
+			let content = fsSync.readFileSync(CONFIG_PATH(), "utf8")
+			if (content.charCodeAt(0) === 0xfeff) content = content.slice(1)
+			const userConfig = JSON.parse(content)
+			const logging = { ...DEFAULT_CONFIG.logging, ...(userConfig.logging ?? {}) }
+			return { version: stat.mtimeMs, config: logging }
+		} catch {
+			return null
+		}
+	}
+}
 
 // Runtime dependencies are resolved lazily so the plugin can load even when
 // node-notifier / detect-terminal are not yet vendored (falls back to a clear
@@ -268,45 +314,22 @@ function resolveSnoreToastExe() {
  * Launch the click-to-open program once the toast is activated.
  *
  * `clickTarget` = { program, args } resolved from config + per-notification
- * context. `fallbackTarget` (optional) is the "simple open wt.exe" plan used
- * when the primary helper fails (spawn throw or non-zero exit), so a broken /
- * missing helper script degrades gracefully instead of doing nothing.
+ * context. Only used by clickMode "program"; "native" launches via SnoreToast
+ * itself and never reaches this function.
  * @param {{program:string,args:string[]}} clickTarget
- * @param {{program:string,args:string[]}|null} fallbackTarget
  * @param {object} overrides
  * @returns {boolean}
  */
-function spawnClick(clickTarget, fallbackTarget, overrides = {}) {
+function spawnClick(clickTarget, overrides = {}) {
 	if (!clickTarget?.program) return false
 	const spawnFn = overrides.clickSpawn ?? overrides.spawn ?? defaultSpawn
-	const launch = (t) => {
-		try {
-			const child = spawnFn(t.program, t.args, { stdio: "ignore", windowsHide: true, detached: true })
-			if (typeof child?.unref === "function") child.unref()
-			return child
-		} catch {
-			return null
-		}
-	}
-	let child
 	try {
-		child = launch(clickTarget)
+		const child = spawnFn(clickTarget.program, clickTarget.args, { stdio: "ignore", windowsHide: true, detached: true })
+		if (typeof child?.unref === "function") child.unref()
+		return !!child
 	} catch {
-		child = null
+		return false
 	}
-	if (child) {
-		// If the primary (helper) exits non-zero, fall back to the simple plan.
-		if (fallbackTarget?.program && typeof child.on === "function") {
-			child.once("exit", (code) => {
-				if (code !== 0) launch(fallbackTarget)
-			})
-		}
-		return true
-	}
-	if (fallbackTarget?.program) {
-		return !!launch(fallbackTarget)
-	}
-	return false
 }
 
 /**
@@ -323,18 +346,12 @@ export function parseActivationPayload(text) {
 	return null
 }
 
-/** Resolve { program, args } from a notification's click options. */
+/** Resolve { program, args } from a notification's click options ("program" mode). */
 function resolveClickTarget(opts) {
+	if (opts?.clickMode === "native") return null
 	const program = opts?.clickProgram
 	if (!program) return null
 	const args = Array.isArray(opts?.clickArgs) ? opts.clickArgs.map(String) : []
-	return { program, args }
-}
-
-function resolveFallbackTarget(opts) {
-	const program = opts?.clickFallbackProgram
-	if (!program) return null
-	const args = Array.isArray(opts?.clickFallbackArgs) ? opts.clickFallbackArgs.map(String) : []
 	return { program, args }
 }
 
@@ -365,8 +382,12 @@ export function sendWindowsToast(opts, overrides = {}) {
 	const spawnFn = overrides.spawn ?? defaultSpawn
 	const banner = resolveBannerPath(opts, overrides)
 	const clickTarget = resolveClickTarget(opts)
-	// Only when click-to-open is configured do we need the pipe to stay alive to
-	// receive the activation callback. Without it we behave exactly as before.
+	// "native" clickMode: hand the program to SnoreToast via -application; no
+	// named-pipe callback needed (SnoreToast launches it on click itself).
+	const nativeApp = opts?.clickMode === "native" ? opts?.clickProgram ?? null : null
+	// Only when a pipe-callback click target is configured do we need the pipe to
+	// stay alive to receive the activation callback. Without it we behave exactly
+	// as before.
 	const keepOpenForClick = !!clickTarget
 
 	// Unique named pipe, mirroring node-notifier's getPipeName() + createNamedPipe().
@@ -382,7 +403,7 @@ export function sendWindowsToast(opts, overrides = {}) {
 				const activated =
 					parseActivationPayload(buf.toString("utf16le")) ||
 					parseActivationPayload(buf.toString("utf8"))
-				if (activated) spawnClick(clickTarget, resolveFallbackTarget(opts), overrides)
+				if (activated) spawnClick(clickTarget, overrides)
 			})
 		})
 		server.on("error", () => {})
@@ -391,7 +412,7 @@ export function sendWindowsToast(opts, overrides = {}) {
 	}
 
 	const doSpawn = () => {
-		const args = buildSnoreToastArgs(opts, banner, pipePath, !!server)
+		const args = buildSnoreToastArgs(opts, banner, pipePath, !!server, nativeApp)
 		try {
 			// detached + unref: SnoreToast must fully outlive the parent (it stays
 			// resident until the toast is clicked/times out). Waiting on 'exit'
@@ -419,7 +440,9 @@ export function sendWindowsToast(opts, overrides = {}) {
 				// click (which can happen many seconds later) still reaches us.
 				releasePipeAfter(child, server, 30000)
 			} else {
-				// No click target: release shortly after, exactly like before.
+				// No pipe-callback click target: release shortly after, exactly
+				// like before. (native -application is still delivered even after
+				// the pipe closes, because SnoreToast owns the launch.)
 				setTimeout(() => {
 					try { server.close() } catch {}
 				}, 1500)
@@ -448,11 +471,17 @@ export function substitutePlaceholders(value, ctx = {}) {
 
 /**
  * Build the full SnoreToast argument list: everything node-notifier's whitelist
- * would allow (`-appID`, `-pipeName`, `-t`, `-m`, `-p`, `-s`) PLUS what it
- * drops (`-application`, `-la`). Pure + sync so tests can assert on the args.
+ * would allow (`-appID`, `-pipeName`, `-t`, `-m`, `-p`, `-s`) PLUS, for the
+ * "native" clickMode, `-application <program>` (SnoreToast launches it itself
+ * on click). Pure + sync so tests can assert on the args.
+ * @param {object} opts
+ * @param {string|undefined} banner
+ * @param {string|undefined} pipePath
+ * @param {boolean} includePipe
+ * @param {string|null} [nativeApp] program to hand to SnoreToast via `-application`
  * @returns {string[]}
  */
-export function buildSnoreToastArgs(opts, banner, pipePath, includePipe) {
+export function buildSnoreToastArgs(opts, banner, pipePath, includePipe, nativeApp = null) {
 	const args = ["-appID", APP_ID]
 	if (opts.title) args.push("-t", String(opts.title))
 	if (opts.message) args.push("-m", String(opts.message))
@@ -460,11 +489,12 @@ export function buildSnoreToastArgs(opts, banner, pipePath, includePipe) {
 	const sound = normalizeToastSound(opts.sound)
 	if (sound) args.push("-s", sound)
 	if (includePipe) args.push("-pipeName", pipePath)
-	// NOTE: we deliberately do NOT forward click-to-open (-application / -la).
-	// The vendored SnoreToast fork's parser does not understand `-la` — it
-	// prints its usage banner and exits -1, so the toast is never displayed at
-	// all. Activation is handled entirely by our own named-pipe callback
-	// (spawnClick), which is why no `-application` is needed either.
+	if (nativeApp) args.push("-application", String(nativeApp))
+	// NOTE: we deliberately do NOT forward `-la`. The vendored SnoreToast fork's
+	// parser does not understand `-la` — it prints its usage banner and exits -1,
+	// so the toast is never displayed at all. "program" clickMode is handled
+	// entirely by our own named-pipe callback (spawnClick); "native" uses the
+	// bare `-application` flag above, which works fine.
 	return args
 }
 
@@ -567,20 +597,46 @@ const DEFAULT_CONFIG = {
 	 */
 	soundOverride: "",
 	/**
-	 * What to launch when a notification is clicked (click-to-open):
-	 *   "helper" -> run scripts/jump-to-opencode.ps1 (focus an existing Windows
-	 *               Terminal window, else open opencode in a fresh tab). Falls
-	 *               back to the "simple" plan if the helper is missing/fails.
-	 *   "simple" -> plain `wt.exe -d <cwd> opencode` (or your clickProgram/args).
-	 *   "off"    -> clicking does nothing.
-	 * An explicit `clickProgram` still always wins over these modes (keeps the
-	 * original documented custom-program feature working).
+	 * What to launch when the user clicks a Windows toast notification:
+	 *   "off"     -> clicking does nothing (default).
+	 *   "program" -> our own named-pipe callback spawns `clickProgram` with
+	 *                `clickArgs` (supports {{title}}/{{cwd}}/{{sessionID}}
+	 *                placeholders + a `-w 0` style window-reuse flag). Most
+	 *                flexible; keeps the pipe alive until the toast is clicked.
+	 *   "native"  -> pass `-application <clickProgram>` straight to SnoreToast,
+	 *                which launches it itself (no args, no pipe kept open).
+	 *                Not as capable, but purely host-agnostic.
+	 * Requires `clickProgram` to be non-empty in both non-"off" modes.
 	 */
-	clickMode: "helper",
-	/** Launch this program when the user clicks a notification (click-to-open). Empty = use clickMode default. */
+	clickMode: "off",
+	/** Launch this program when the user clicks a notification (click-to-open). Empty = clickMode is effectively off. */
 	clickProgram: "",
-	/** Extra args appended when launching `clickProgram`. Supports {{title}}/{{cwd}}/{{sessionID}}. */
+	/** Extra args appended when launching `clickProgram` (clickMode "program"). Supports {{title}}/{{cwd}}/{{sessionID}}. */
 	clickArgs: [],
+	/**
+	 * Diagnostic logging via the generic plugin-logger. Default "WARN" keeps
+	 * disk I/O minimal; set minLogLevel to "ALL" while debugging and it will
+	 * capture raw session.error / idle / status payloads plus classification
+	 * and toast decisions.
+	 */
+	logging: {
+		/** Min severity that is written to the file: ALL/TRACE/DEBUG/INFO/WARN/ERROR/NO. */
+		minLogLevel: "WARN",
+		/** Per-module overrides ({moduleName: level}) — "INHERIT" means the global. */
+		moduleLogLevels: {},
+		/** Force a directory (tests). Default: %TEMP%\kdcokenny-notify-win. */
+		logDir: null,
+		/** Days to keep rotated logs before delete. */
+		logRetentionDays: 30,
+		/** flush strategy: "hybrid" | "sync". */
+		logFlushMode: "hybrid",
+		/** hybrid: sync to disk every N entries. */
+		logSyncCheckpointInterval: 5,
+		/** max buffered entries before forced flush. */
+		logBufferMaxEntries: 100,
+		/** timer-based flush interval ms. */
+		logBufferFlushIntervalMs: 500,
+	},
 	/**
 	 * When the user presses ESC / stops a run, OpenCode takes the session idle
 	 * without an error. Instead of announcing READY FOR REVIEW, send a distinct
@@ -620,6 +676,7 @@ async function loadConfig() {
 			sounds: { ...DEFAULT_CONFIG.sounds, ...userConfig.sounds },
 			quietHours: { ...DEFAULT_CONFIG.quietHours, ...userConfig.quietHours },
 			heartbeat: { ...DEFAULT_CONFIG.heartbeat, ...userConfig.heartbeat },
+			logging: { ...DEFAULT_CONFIG.logging, ...userConfig.logging },
 		}
 	} catch {
 		// Missing or invalid config -> defaults
@@ -742,6 +799,30 @@ const USER_ABORT_MESSAGE_HINTS = [
 	"canceled by the user",
 ]
 
+/**
+ * Nameless payloads (bare strings, no `name` field) that still unambiguously
+ * read as a manual interrupt. `categorizeErrorEvent` uses these as a fallback
+ * when there is no Error name to inspect — OpenCode frequently surfaces an ESC
+ * as a plain string ("This operation was aborted", "The user aborted", ...)
+ * rather than an AbortError object, and those strings must not fall into the
+ * network-interruption bucket just because they contain the word "aborted".
+ */
+const USER_STOP_TEXT_HINTS = [
+	"aborted",
+	"aborted by user",
+	"aborted by the user",
+	"user aborted",
+	"aborted a request",
+	"operation was aborted",
+	"this operation was aborted",
+	"was aborted",
+	"user stopped",
+	"stopped by user",
+	"user interrupted",
+	"interrupted by the user",
+	"interrupt signal",
+]
+
 /** Error names that unambiguously mean the user/runtime stopped the run on purpose. */
 const USER_STOP_ERROR_NAMES = [
 	"userinterrupt",
@@ -785,6 +866,15 @@ export function categorizeErrorEvent(error) {
 	if (name.includes("aborterror")) {
 		const explicitNetwork = NETWORK_ERROR_HINTS.some((hint) => hint !== "aborted" && text.includes(hint))
 		return explicitNetwork ? "network-interruption" : "user-cancel"
+	}
+
+	// Nameless payload (bare string): OpenCode often surfaces a manual ESC as a
+	// plain string rather than an Error object, so there is no name to inspect.
+	// If the text itself reads as a user stop (and no genuine connection-level
+	// signature is present), prefer user-cancel over the network mislabel.
+	if (!name && USER_STOP_TEXT_HINTS.some((hint) => text.includes(hint))) {
+		const explicitNetwork = NETWORK_ERROR_HINTS.some((hint) => hint !== "aborted" && text.includes(hint))
+		if (!explicitNetwork) return "user-cancel"
 	}
 
 	// Everything else falls back to message heuristics.
@@ -1045,23 +1135,51 @@ function createSharedDedupeStore(filePath) {
  * @returns {Dedupe}
  */
 function createDedupe(store = null, windowMs = DEDUPE_WINDOW_MS) {
+	// In-memory backing used when no shared store is provided, so state persists
+	// across calls within this plugin instance (the shared store path is only for
+	// cross-instance deduping — e.g. suppress windows that each copy tracks itself).
+	const local = new Map()
+	const asMap = () => (store ? store.load() : local)
+	const saveIfStore = (map) => { if (store) store.save(map) }
+	const purge = (map, now) => {
+		for (const [k, ts] of map) {
+			if (now - ts >= windowMs) map.delete(k)
+		}
+		return map
+	}
 	return {
 		/** @returns {boolean} true if this notify should be sent (not recently sent) */
 		shouldSend(key) {
 			const now = Date.now()
-			const recent = store ? store.load() : new Map()
-			for (const [k, ts] of recent) {
-				if (now - ts >= windowMs) recent.delete(k)
-			}
+			const map = purge(asMap(), now)
 			let should = true
-			if (key !== undefined && key !== null && now - (recent.get(key) ?? 0) < windowMs) {
+			if (key !== undefined && key !== null && now - (map.get(key) ?? 0) < windowMs) {
 				should = false
 			} else {
-				recent.set(key, now)
+				map.set(key, now)
 			}
-			if (store) store.save(recent)
+			saveIfProvided(map)
 			return should
 		},
+		/**
+		 * True if `key` is still within its suppression window, WITHOUT writing
+		 * anything new (read-only). Used to detect "this run already produced a
+		 * terminal toast" — e.g. session.error claimed the run-token, so a late
+		 * session.idle for the SAME run must not announce READY, regardless of how
+		 * long after the error it arrives.
+		 * @param {string|number|null|undefined} key
+		 * @returns {boolean}
+		 */
+		isClaimed(key) {
+			if (key === undefined || key === null) return false
+			const now = Date.now()
+			const map = purge(asMap(), now)
+			return now - (map.get(key) ?? 0) < windowMs
+		},
+	}
+	function saveIfProvided(map) {
+		if (!store) return
+		store.save(map)
 	}
 }
 
@@ -1100,11 +1218,24 @@ export function createNotifyPlugin(overrides = {}) {
 		const { client } = ctx ?? {}
 
 		const config = await readConfig()
+
+		// Bootstrap the generic logger (once). Min level defaults to WARN so normal
+		// running writes almost nothing; set logging.minLogLevel:"ALL" to capture
+		// raw payloads + decisions as you debug.
+		PluginLogger.init({ ...DEFAULT_CONFIG.logging, ...(config.logging ?? {}), configLoader: buildLoggingConfigLoader() })
+
 		const dedupeStore = createSharedDedupeStore(dedupeStorePath)
 		const questionDedupe = createDedupe(dedupeStore)
 		const readyDedupe = createDedupe(dedupeStore)
 		const permissionDedupe = createDedupe(dedupeStore)
 		const errorDedupe = createDedupe(dedupeStore)
+		// 15s in-memory window: a session.error must not be followed by a READY
+		// toast even when the session.idle event arrives later than the 1.5s
+		// readyDedupe window (the recurring "ESC → NETWORK INTERRUPT then READY"
+		// bug). Kept in-memory (no shared store) so the shared file's per-instance
+		// purge can't collide across dedupe windows — each OpenCode plugin copy
+		// sees the same error event and independently suppresses its own READY.
+		const readySuppressDedupe = createDedupe(null, 15_000)
 		// Long-window dedupe so a heartbeat backfill can't be double-sent by the
 		// global+project copies of the plugin sharing the same store file.
 		const heartbeatDedupe = createDedupe(dedupeStore, HEARTBEAT_DEDUPE_MS)
@@ -1138,23 +1269,23 @@ export function createNotifyPlugin(overrides = {}) {
 			terminal = null
 		}
 
-		const buildNotifyOptions = ({ title, message, sound, theme, clickProgram, clickArgs, clickFallbackProgram, clickFallbackArgs }) => ({
+		const buildNotifyOptions = ({ title, message, sound, theme, clickMode, clickProgram, clickArgs }) => ({
 			title,
 			message,
 			sound,
 			theme,
 			iconTheme: config.iconTheme,
+			clickMode,
 			clickProgram,
 			clickArgs,
-			clickFallbackProgram,
-			clickFallbackArgs,
 		})
 
 		const send = (opts) => {
 			try {
+				PluginLogger.debug("notify", "L3001", "send toast title={} theme={} clickMode={} clickProgram={}", opts.title, opts.theme, opts?.clickMode, opts?.clickProgram ?? "")
 				sendNotification(buildNotifyOptions(opts))
 			} catch (err) {
-				console.warn("[kdco-notify-win] notification failed:", err)
+				PluginLogger.warn("notify", "L3002", "notification send failed: {}", err)
 			}
 		}
 
@@ -1166,40 +1297,20 @@ export function createNotifyPlugin(overrides = {}) {
 		/**
 		 * Resolve the click-to-open plan for a notification.
 		 *
-		 * Precedence:
-		 *   1. clickMode === "off"                       -> no click
-		 *   2. explicit config.clickProgram              -> custom program (documented feature)
-		 *   3. clickMode === "simple"                     -> plain wt.exe
-		 *   4. clickMode === "helper" (default)           -> jump-to-opencode.ps1 (+ simple fallback)
+		 * clickMode:
+		 *   "off"     -> null (no click)
+		 *   "program" -> spawn `clickProgram` + `clickArgs` via our pipe callback
+		 *   "native"  -> `-application <clickProgram>` handled by SnoreToast
 		 * Placeholders ({{title}}/{{cwd}}/{{sessionID}}) are substituted from the
-		 * per-notification context so the helper knows which session to jump to.
+		 * per-notification context.
 		 */
 		const resolveClickPlan = (cfg) => {
-			const mode = cfg.clickMode ?? "helper"
+			const mode = cfg.clickMode ?? "off"
 			if (mode === "off") return null
-			if (cfg.clickProgram) {
-				return {
-					target: { program: cfg.clickProgram, args: Array.isArray(cfg.clickArgs) ? cfg.clickArgs.map(String) : [] },
-					fallback: null,
-				}
-			}
-			if (mode === "simple") {
-				return {
-					target: { program: "wt.exe", args: ["-d", "{{cwd}}", "opencode"] },
-					fallback: null,
-				}
-			}
-			const helper = path.join(PLUGIN_DIR, "jump-to-opencode.ps1")
+			if (!cfg.clickProgram) return null
 			return {
-				target: {
-					program: "powershell",
-					args: [
-						"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-						"-File", helper,
-						"-Title", "{{title}}", "-Cwd", "{{cwd}}", "-SessionId", "{{sessionID}}",
-					],
-				},
-				fallback: { program: "wt.exe", args: ["-d", "{{cwd}}", "opencode"] },
+				mode,
+				target: { program: cfg.clickProgram, args: Array.isArray(cfg.clickArgs) ? cfg.clickArgs.map(String) : [] },
 			}
 		}
 
@@ -1210,12 +1321,9 @@ export function createNotifyPlugin(overrides = {}) {
 			if (config.soundOverride) extras.sound = config.soundOverride
 			const plan = resolveClickPlan(config)
 			if (plan) {
+				extras.clickMode = plan.mode
 				extras.clickProgram = substitutePlaceholders(plan.target.program, ctx)
 				extras.clickArgs = plan.target.args.map((a) => substitutePlaceholders(a, ctx))
-				if (plan.fallback) {
-					extras.clickFallbackProgram = substitutePlaceholders(plan.fallback.program, ctx)
-					extras.clickFallbackArgs = plan.fallback.args.map((a) => substitutePlaceholders(a, ctx))
-				}
 			}
 			return extras
 		}
@@ -1248,6 +1356,16 @@ export function createNotifyPlugin(overrides = {}) {
 			if (!(await shouldNotifyParent(sessionID))) return
 			if (isQuietHours(config)) return
 
+			// A session.error (network / crash / ESC) just fired for this session:
+			// don't let the idle that follows it re-announce READY. The 1.5s
+			// readyDedupe window at the event layer catches the immediate pair;
+			// this 15s window catches idles that arrive a few seconds later.
+			if (readySuppressDedupe.isClaimed(`suppress:${sessionID}`)) {
+				PluginLogger.debug("notify", "L2012", "idle suppressed (error seen within 15s) sessionID={}", sessionID)
+				activeSessions.delete(sessionID)
+				return
+			}
+
 			currentSessionID = sessionID
 			// Fetch the timeline once; drive BOTH the run-outcome classification and
 			// the step summary from it, so idle costs a single messages round-trip.
@@ -1257,7 +1375,22 @@ export function createNotifyPlugin(overrides = {}) {
 
 			// A run that ended in error must NOT announce READY later. This is the
 			// robust (state-based) counterpart to the 1.5s time-window suppression.
-			if (outcome === "error") return
+			if (outcome === "error") {
+				PluginLogger.debug("notify", "L2010", "idle suppressed (outcome=error) sessionID={}", sessionID)
+				return
+			}
+
+			// Run-token claim: if THIS run already produced a terminal toast (a
+			// session.error / STOPPED BY YOU claimed `hb:<sessionID>:<updated>`),
+			// a session.idle that arrives AFTER the 1.5s dedupe window would
+			// otherwise wrongly announce READY. Keyed by the run's `time.updated`
+			// so a brand-new run of the same session still gets its READY.
+			const runToken = ctx.updated ? `hb:${sessionID}:${String(ctx.updated)}` : null
+			if (runToken && heartbeatDedupe.isClaimed(runToken)) {
+				PluginLogger.info("notify", "L2011", "idle suppressed (run token already claimed) sessionID={} updated={}", sessionID, ctx.updated)
+				activeSessions.delete(sessionID)
+				return
+			}
 
 			if (outcome === "aborted" && config.notifyCancelled !== false) {
 				activeSessions.delete(sessionID)
@@ -1302,6 +1435,13 @@ export function createNotifyPlugin(overrides = {}) {
 			const userCancelled = category === "user-cancel"
 			const isNetwork = category === "network-interruption" || category === "http-error"
 
+			// Diagnostic: capture the RAW error payload + the category we chose, so
+			// an ESC being mislabeled as NETWORK (the recurring bug) can be fixed
+			// from the log instead of guessed. Enabled via logging.minLogLevel:"ALL".
+			PluginLogger.debug("notify", "L2001", "session.error raw={}", safeStringify(rawError))
+			PluginLogger.info("notify", "L2002", "session.error categorized={} name={} text={} sessionID={}",
+				category, String(rawError?.name ?? ""), (extractErrorMessage(rawError) ?? "").slice(0, 120), sessionID)
+
 			const text = extractErrorMessage(rawError)
 			const message = (text ?? "").slice(0, 100) || "Something went wrong"
 			const body = await composeMessage({ kind: userCancelled ? "cancelled" : "error", title: message })
@@ -1310,6 +1450,10 @@ export function createNotifyPlugin(overrides = {}) {
 			// Mark the same session's ready key as recently-sent so any idle event
 			// arriving within the dedupe window is suppressed.
 			readyDedupe.shouldSend(`ready:${sessionID}`)
+			// Also claim the 15s suppression window (and, via claimRunNotified
+			// below, the per-run token) so a late idle is suppressed even when it
+			// arrives after the 1.5s readyDedupe window has expired.
+			readySuppressDedupe.shouldSend(`suppress:${sessionID}`)
 			activeSessions.delete(sessionID)
 			claimRunNotified(ctx.updated, sessionID)
 			if (userCancelled && config.notifyCancelled !== false) {
@@ -1500,6 +1644,10 @@ export function createNotifyPlugin(overrides = {}) {
 				try {
 					const type = event?.type
 					const props = event?.properties ?? {}
+
+					// Raw event payload for diagnosis (only when logging.minLogLevel
+					// allows DEBUG/ALL). Each branch below logs its own specifics.
+					PluginLogger.debug("notify", "L1001", "event type={} payload={}", type ?? "", safeStringify(props, 1500))
 
 					switch (type) {
 					case "session.status": {

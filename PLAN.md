@@ -205,3 +205,34 @@ opencode-notify/
 - **修复**：新增 `categorizeErrorEvent(error)`，**先按错误名判定**（`AbortError`/`UserInterrupt`/明说 user 的消息 → `user-cancel`），再对裸 `AbortError` 做「消息是否带连接特征」细分；仅当无中止特征时才落到原有消息启发式。`handleSessionError` 按类别路由：user-cancel → **STOPPED BY YOU**（灰 banner，`notifyCancelled:false` 时静默）；network/http → NETWORK INTERRUPTED/SOMETHING WENT WRONG；generic → SOMETHING WENT WRONG。
 - 注意边界：真实网络中断若以「裸 AbortError 且无连接特征」形式到达，会被当作 user-cancel（尽力而为，README 已注明）。
 - **测试**：新增 `categorizeErrorEvent` 6 例 + session.error 集成 4 例（AbortError→STOPPED BY YOU、user 消息→STOPPED BY YOU、notifyCancelled:false 静默、generic→SOMETHING WENT WRONG）；`buildSnoreToastArgs` 断言改为「不转发 -application/-la」；点击集成测试改用轮询等待（Windows 命名管道回调在套件环境下可能被推迟数秒，2000ms 断言改为 15s 窗口）。共 **66 passed, 0 failed**。
+
+## 11. 收敛轮（2026-08-06）：点击机制三态化 + 通用日志系统 + ESC/READY 修复收尾
+
+> 前一轮引入的 helper 脚本 + fallback 链被判定过度设计。用户拍板：把两种点击机制固化为两个不同 `clickMode`（`off`/`program`/`native`），删除 helper；同时补齐可热更新的文件日志系统，用插桩根治无法复现的 ESC 分类与 silent-stop READY 问题。
+
+### 11.1 点击三态（决策点：两种机制 → 两个 clickMode）
+
+- **`clickMode`**：`"off"`（默认，点击无动作）| `"program"`（管道回调 spawn `clickProgram`+`clickArgs`，支持 `{{title}}/{{cwd}}/{{sessionID}}` 占位符，宿主无关）| `"native"`（SnoreToast `-application` 直接拉起，无参数、不保管道、永远开新窗口）。两种非 off 模式都要求 `clickProgram` 非空。
+- 默认改 `off`：未配置 `clickProgram` 时不再试图拼任何点击参数，杜绝重新引入 `-la` 式回归。
+- **删除**：`jump-to-opencode.ps1`、`resolveFallbackTarget`、`clickFallback*`、helper/simple 计划；`scripts/deploy.ps1` 不再复制 helper 且清理目标残留。
+- **`wt.exe -w 0`**（MS Learn 确认）：复用最近窗口（无则新建）、`-w -1`/`-w new` 新窗口、`-w <id/name>` 指定窗口。README 的 `program` 示例即 `wt.exe -w 0 -d {{cwd}} opencode` 实现「复用窗口回到目录」。
+
+### 11.2 通用日志系统（新文件 `plugin-logger.js`）
+
+- 按参考项目（agent 能力基线）对齐：`%TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log`、默认 `minLogLevel:"WARN"`、SLF4J `{}` 模板、缓冲 flush（`unref` 定时器）、保留 30 天、`module`/`codeId`、Error stack、TRACE data JSON。
+- `buildLoggingConfigLoader` 以 mtime 版本号检测配置变更实现**热更新**（改 `kdco-notify.json` 无需重启即生效）。
+- 插桩点：`L1001` 事件原始 payload、`L2001/L2002` error 原始 + 分类、`L2010-L2012` idle 决策（15s 抑制命中 / run-token 占用 / 正常 READY）、`L3001/L3002` toast 发送。
+- 测试：`test/logger.test.mjs` 新增 **10 项全绿**（等级门控、ALL 全写、{} 替换、模块/codeId、前缀格式、Error stack、TRACE data、文件名、NO 零文件、flushOnExit）。
+
+### 11.3 ESC 分类防御性兜底 + silent-stop READY 双保险
+
+- **ESC 分类**：不再依赖「实测 payload 才定稿」——`categorizeErrorEvent` 对 nameless 字符串加 `USER_STOP_TEXT_HINTS`（含裸 `aborted`、`user aborted`、`operation was aborted` 等），无真实网络特征 → `user-cancel`。字符串分类 3 例测试覆盖。
+- **READY 抑制**：`readySuppressDedupe = createDedupe(null, 15_000)` 用**内存** 15s 窗（必须内存：共享 store 的 1.5s `readyDedupe` purge 会误删 suppress 条目）+ `handleSessionIdle` 开头按 run token（`hb:<sessionID>:<updated>`）claim 检查；error/cancelled 已占用则 idle 直接 return。`createDedupe` 的 `store=null` 回退改为**持久 local Map**（不能每次重建），并新增只读 `isClaimed(key)`。
+
+### 11.4 核验
+
+- [x] `node test/notify.test.mjs` **74 passed**（新增：native `-application` 2 例、字符串分类 3 例、ESC-string→STOPPED BY YOU 且 idle 不再补 READY、1.7s 后 15s 窗抑制、正常 idle 仍 READY；点击测试改用 `clickMode:"program"` + 默认 off 断言）。
+- [x] `node test/logger.test.mjs` **10 passed**。
+- [x] README 更新（clickMode 三态、`-w 0` 示例、logging 配置段、布局树/手动拷贝去 helper）。
+- [ ] 重新部署两处目标并逐字节校验（含 `plugin-logger.js`、无 `jump-to-opencode.ps1` 残留）——下一步。
+- [ ] 提交（分支 `dev`）。

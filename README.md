@@ -25,7 +25,7 @@ Resulting layout (this is what must be in the plugins root):
 ```
 ~/.config/opencode/plugins/          (or .opencode/plugins/)
 ├── kdco-notify-win.js     # entry — auto-loaded
-├── jump-to-opencode.ps1   # click-to-open helper (clickMode = "helper")
+├── plugin-logger.js       # generic file logger (Diagnostic instrumentation)
 ├── assets/                # icon + banner
 └── node_modules/          # vendored node-notifier + detect-terminal
 ```
@@ -35,7 +35,7 @@ Resulting layout (this is what must be in the plugins root):
 ```powershell
 # Copy the flattened contents INTO the plugins root (not as a subfolder)
 copy dist\kdco-notify-win\kdco-notify-win.js  %USERPROFILE%\.config\opencode\plugins\
-copy dist\kdco-notify-win\jump-to-opencode.ps1 %USERPROFILE%\.config\opencode\plugins\
+copy dist\kdco-notify-win\plugin-logger.js %USERPROFILE%\.config\opencode\plugins\
 xcopy dist\kdco-notify-win\node_modules       %USERPROFILE%\.config\opencode\plugins\node_modules\ /E
 xcopy dist\kdco-notify-win\assets             %USERPROFILE%\.config\opencode\plugins\assets\ /E
 
@@ -92,6 +92,8 @@ A network failure must not be followed by a "READY FOR REVIEW" toast for the sam
 - **Toasts stopped appearing and the CLI printed SnoreToast's usage banner**: `buildSnoreToastArgs` used to forward click-to-open as `-application <prog> -la <args>`. The vendored SnoreToast fork does not understand `-la` — its parser prints the usage banner and exits with `-1`, so **no toast was ever shown**. Click-to-open is now handled entirely by the plugin's own named-pipe activation callback (`spawnClick`), so SnoreToast only ever receives its safe arg set (`-appID -t -m -p -s -pipeName`).
 - **Repeated ESC / interrupts crashed the CLI**: the `event` and `tool.execute.before` handlers were `async` without a top-level guard, so any rejected `await` became an `unhandledRejection` (Node 15+ terminates the whole process on one). Both handlers are now wrapped in try/catch that logs and swallows, so a flaky session fetch or plugin bug can never take down OpenCode.
 - **ESC showed NETWORK INTERRUPTED**: a manual interrupt surfaces as `session.error` with a bare `AbortError` whose message contains "aborted" — which the old `classifyError` treated as a network drop. New `categorizeErrorEvent` checks the error **name** first (`AbortError` / `UserInterrupt` / user-naming message → `user-cancel`), so ESC now correctly fires **STOPPED BY YOU** (or is silent when `notifyCancelled: false`).
+- **Click-to-open was over-engineered**: the two mechanisms (pipe-callback `spawnClick` vs the helper script) became two distinct `clickMode` values — `"program"` (our own pipe callback) and `"native"` (SnoreToast `-application`). The `jump-to-opencode.ps1` helper and its fallback chain were deleted; click behavior is now fully described by `clickMode` + `clickProgram` + `clickArgs`.
+- **Diagnostic logging added**: new `plugin-logger.js` ships with the plugin so a misclassification can be diagnosed in the field (`logging.enabled: true, "minLogLevel": "ALL"`). Also fixed the silent-stop READY path to consult a 15s suppression window and a per-run token claim, so an error/stop followed by a silent idle no longer re-fires "READY FOR REVIEW".
 
 ## Configuration (Optional)
 
@@ -116,9 +118,14 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
   "themedIcons": true,
   "iconTheme": "legacy",
   "soundOverride": "",
-  "clickMode": "helper",
+  "clickMode": "off",
   "clickProgram": "",
   "clickArgs": [],
+  "logging": {
+    "enabled": false,
+    "minLogLevel": "WARN",
+    "dir": ""
+  },
   "notifyCancelled": true,
   "heartbeat": {
     "enabled": true,
@@ -132,15 +139,23 @@ Works out of the box. Create `~/.config/opencode/kdco-notify.json`:
 Notes:
 - **`sound`** — a Windows toast preset name in the `Notification.*` namespace (`Notification.Mail`, `Notification.Reminder`, `Notification.SMS`, `Notification.IM`, `Notification.Looping.Call`, …). Values that are NOT `Notification.*`-prefixed (the old `Glass`/`Basso`/`Submarine` names) are normalized to `Notification.Reminder`, because SnoreToast rejects bare names and shows no toast at all. Verified audible on this machine: `Mail`, `Reminder`, `SMS`, `IM`, `Looping.Call`. `Notification.Default` is **silent** on this system, so it is avoided as a default.
 - **`soundOverride`** — a `Notification.*` preset name that overrides the per-kind `sound`. (SnoreToast's `-s` accepts sound URIs / `ms-winsoundevent` names; absolute `.wav` paths are not supported and are normalized to `Notification.Reminder`.)
-- **`clickMode`** — what a toast click does (`"helper"` default | `"simple"` | `"off"`):
-  - `helper` (default): run the bundled `jump-to-opencode.ps1` — if a Windows Terminal is already running, bring the best-matching window to the foreground (session title, else any `opencode` window, else the most recent); only if **no** `wt.exe` is running does it open a fresh tab running `opencode` in the session's working directory. If the helper is missing or fails it falls back to `simple`.
-  - `simple`: plain `wt.exe -d <cwd> opencode`.
-  - `off`: clicking does nothing.
-  - An explicit `clickProgram` always wins over these modes (used for a fully custom program). `clickArgs` may contain `{{title}}`, `{{cwd}}`, `{{sessionID}}` placeholders, substituted per notification.
+- **`clickMode`** — what a toast click does (`"off"` default | `"program"` | `"native"`). Requires a non-empty `clickProgram` in both non-`off` modes:
+  - `off` (default): clicking does nothing — the toast's activation pipe is still read, but no program is launched.
+  - `program`: the plugin's own named-pipe activation callback spawns `clickProgram` with `clickArgs` (supports `{{title}}`, `{{cwd}}`, `{{sessionID}}` placeholders). Full control, host-agnostic re-open of the working directory:
+    ```json
+    { "clickMode": "program", "clickProgram": "wt.exe", "clickArgs": ["-w", "0", "-d", "{{cwd}}", "opencode"] }
+    ```
+    (`wt.exe -w 0` reuses the most recent Windows Terminal window, or opens a fresh one).
+  - `native`: pass `-application <clickProgram>` straight to SnoreToast, which launches the program itself — no args, no pipe kept open, always a brand-new window. Simplest to configure but least control:
+    ```json
+    { "clickMode": "native", "clickProgram": "wt.exe opencode" }
+    ```
+  - There is no separate "helper" mode any more — the bundsed `jump-to-opencode.ps1` was removed (the click fallback/complexity it added is gone).
 - **Run cancellation (ESC)** — a run stopped by the user surfaces either as a `session.error` carrying an `AbortError` (checked first via the error name) or as an idle final part in `aborted` state. Both paths produce the distinct **STOPPED BY YOU** toast with its own grey banner. Disable with `"notifyCancelled": false`.
 - **Heartbeat (silent-stop watchdog)** — if a run goes quiet past `stallSec` (default 120s) and then ends **without** any `session.error`/`session.idle` event reaching the plugin, the heartbeat polls the session's real state and backfills a **SESSION ENDED** toast (body notes "not received an end signal"). `warnWhileStalled: true` additionally telegraphs a **SESSION STALLED** warning while a session is *still* running but silent past the stall. This closes the "no notification at all on silent network death" gap that pure event handling can never see. It is on by default.
 - **Click-to-open implementation note** — the click handler reads the activation callback SnoreToast writes to the named pipe (previously that pipe's data was ignored and closed after 1.5s, so clicks did nothing). The pipe is now kept open for the toast's lifetime **only when a click target is configured**; the no-click path is unchanged (1.5s then release).
-- **Precise-tab limitation** — Windows Terminal exposes no stable public CLI to focus an *arbitrary* tab by title. The helper focuses the matching *window* (whose title mirrors the focused tab). Exact per-session tab pinning is best-effort and not guaranteed.
+- **Precise-tab limitation** — Windows Terminal exposes no stable public CLI to focus an *arbitrary* tab by title. `-w 0` reuses the most recent *window* (whose title mirrors the focused tab); exact per-session tab pinning is best-effort and not guaranteed.
+- **`logging`** — optional Diagnostic file logging. `enabled: true` + `minLogLevel: "ALL"` writes every classified event (`L1001` raw payload, `L2001`/`L2002` error category, `L2010`–`L2012` READY decisions, `L3001`/`L3002` toast dispatch) to `%TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log`. `dir` overrides the folder; `minLogLevel` (`ALL`/`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`NO`, default `WARN`) and `moduleLogLevels` let you gate verbosity. The config is hot-reloaded when the file changes.
 - `terminal` (optional) overrides terminal auto-detection.
 - **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`).
 - **`showSummary` / `summarySteps`** — for READY notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).
@@ -154,6 +169,7 @@ This repo has no build tooling — the plugin in `dist/kdco-notify-win/kdco-noti
 ```bash
 # Self-test (no real notifier / OpenCode needed; fakes are injected)
 node test/notify.test.mjs
+node test/logger.test.mjs
 
 # Demo: real Windows Toast (after `npm install` in dist/kdco-notify-win)
 node test/demo.mjs

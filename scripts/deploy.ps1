@@ -31,15 +31,24 @@ Write-Host "Deploying to: $pluginsDir"
 if (-not (Test-Path $src)) { throw "Source package not found: $src" }
 New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
 
-# Flatten: entry .js, click helper, node_modules, assets go straight into the
+# Flatten: entry .js, plugin-logger.js, node_modules, assets go straight into the
 # plugins root.
 Copy-Item -Force (Join-Path $src "kdco-notify-win.js") $pluginsDir
-Copy-Item -Force (Join-Path $src "jump-to-opencode.ps1") $pluginsDir
+Copy-Item -Force (Join-Path $src "plugin-logger.js") $pluginsDir
 Copy-Item -Recurse -Force (Join-Path $src "assets") $pluginsDir
 Copy-Item -Recurse -Force (Join-Path $src "node_modules") $pluginsDir
 
+# Remove any leftover click-helper script from older deploys (the helper-based
+# jump-to-opencode approach was removed; click-to-open now uses clickMode
+# "program"/"native" inside the plugin).
+$leftoverHelper = Join-Path $pluginsDir "jump-to-opencode.ps1"
+if (Test-Path -LiteralPath $leftoverHelper) {
+    Remove-Item -LiteralPath $leftoverHelper -Force
+    Write-Host "  removed leftover helper: jump-to-opencode.ps1"
+}
+
 Write-Host "Done. Restart OpenCode to load the plugin."
 Write-Host "  entry:     $pluginsDir\kdco-notify-win.js"
-Write-Host "  helper:    $pluginsDir\jump-to-opencode.ps1"
+Write-Host "  logger:    $pluginsDir\plugin-logger.js"
 Write-Host "  assets:    $pluginsDir\assets"
 Write-Host "  deps:      $pluginsDir\node_modules"

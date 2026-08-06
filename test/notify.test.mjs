@@ -160,6 +160,18 @@ async function main() {
 			"network-interruption",
 		)
 	})
+	await test("categorize bare string 'This operation was aborted' -> user-cancel", () => {
+		// OpenCode frequently surfaces a manual ESC as a NAMELESS string rather
+		// than an AbortError object; the word "aborted" alone must not mislabel
+		// it as a network interruption (the recurring bug).
+		assert.equal(categorizeErrorEvent("This operation was aborted"), "user-cancel")
+		assert.equal(categorizeErrorEvent("The user aborted"), "user-cancel")
+		assert.equal(categorizeErrorEvent("Aborted"), "user-cancel")
+	})
+	await test("categorize string with real network signature still -> network", () => {
+		assert.equal(categorizeErrorEvent("aborted: fetch failed read ECONNRESET"), "network-interruption")
+		assert.equal(categorizeErrorEvent("Connection reset"), "network-interruption")
+	})
 	await test("categorize network message -> network", () => {
 		assert.equal(categorizeErrorEvent("fetch failed: read ECONNRESET"), "network-interruption")
 	})
@@ -241,6 +253,45 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: { name: "AbortError" } } },
 		})
 		assert.equal(h.sent.length, 0)
+	})
+
+	await test("ESC as nameless string -> STOPPED BY YOU, then idle does NOT re-announce READY", async () => {
+		// Reproduces the real-world regression: an ESC surfaces as session.error
+		// with a NAMELESS string, and OpenCode then ALSO emits session.idle. Only
+		// the STOPPED BY YOU toast may appear — no NETWORK, no READY after it.
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.error", properties: { sessionID: "parent", error: "This operation was aborted" } },
+		})
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1, "exactly one toast (no READY, no NETWORK)")
+		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].theme, "cancelled")
+		assert.equal(h.beeps.length, 0)
+	})
+
+	await test("idle after error beyond the readyDedupe window is suppressed (15s fallback)", async () => {
+		// The 1.5s readyDedupe window can expire before a slow session.idle
+		// arrives. The 15s readySuppress window must still block READY.
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } },
+		})
+		// Must exceed the 1.5s event-layer readyDedupe window so the idle actually
+		// reaches handleSessionIdle; the 15s readySuppress window then blocks it.
+		await new Promise((r) => setTimeout(r, 1700))
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1, "still exactly one toast")
+		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+	})
+
+	await test("idle without any prior error still announces READY after the suppress window", async () => {
+		// Sanity: a normal completion whose idle arrives (well after startup)
+		// must NOT be blocked because some OTHER session errored.
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent.length, 1)
+		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 	})
 
 	await test("generic session.error remains SOMETHING WENT WRONG", async () => {
@@ -430,11 +481,18 @@ async function main() {
 	})
 
 	await test("clickProgram is passed through as clickProgram", async () => {
-		const cfg = { ...baseConfig(), clickMode: "simple", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] }
+		const cfg = { ...baseConfig(), clickMode: "program", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].clickProgram, "wt.exe")
 		assert.deepEqual(h.sent[0].clickArgs, ["-d", ".", "opencode"])
+	})
+
+	await test("clickMode off (default) sends no click program", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].clickProgram === undefined, true)
+		assert.equal(h.sent[0].clickArgs === undefined, true)
 	})
 
 	await test("default (no override) uses per-kind sound", async () => {
@@ -645,7 +703,7 @@ async function main() {
 			return fakeChild
 		}
 		sendWindowsToast(
-			{ title: "T", message: "M", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] },
+			{ title: "T", message: "M", clickMode: "program", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] },
 			{ platform: "win32", snoreToastExe: "C:\\snoretoast.exe", spawn },
 		)
 		const waitFor = async (cond, ms) => {
@@ -709,6 +767,35 @@ async function main() {
 		assert.ok(!args.includes("-la"), "must not forward -la to SnoreToast")
 		assert.ok(!args.includes("wt.exe"), "click program must not reach SnoreToast")
 		assert.equal(args[args.indexOf("-pipeName") + 1], "\\\\.\\pipe\\notifierPipe-abc")
+	})
+
+	await test("buildSnoreToastArgs native mode forwards -application but never -la", async () => {
+		const args = buildSnoreToastArgs(
+			{ title: "T", message: "M", clickMode: "native", clickProgram: "wt.exe" },
+			"C:\\banner.png",
+			"\\\\.\\pipe\\notifierPipe-abc",
+			true,
+			"wt.exe",
+		)
+		assert.ok(args.includes("-application"), "native mode must pass -application")
+		assert.equal(args[args.indexOf("-application") + 1], "wt.exe")
+		assert.ok(!args.includes("-la"), "must never forward -la")
+		assert.ok(args.includes("-pipeName"), "pipe still wired for reliable display")
+	})
+
+	await test("sendWindowsToast native mode passes -application to SnoreToast", async () => {
+		let captured = null
+		const spawn = (cmd, args) => {
+			captured = args
+			return { unref: () => {} }
+		}
+		sendWindowsToast(
+			{ title: "T", message: "M", clickMode: "native", clickProgram: "wt.exe" },
+			{ platform: "win32", snoreToastExe: "C:\\snoretoast.exe", spawn },
+		)
+		await new Promise((r) => setTimeout(r, 60))
+		assert.ok(captured.includes("-application"), "should pass -application")
+		assert.equal(captured[captured.indexOf("-application") + 1], "wt.exe")
 	})
 
 	await test("buildSnoreToastArgs normalizes bare sound to a working sound", async () => {
