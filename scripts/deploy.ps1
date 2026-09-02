@@ -48,16 +48,16 @@ if (Test-Path -LiteralPath $leftoverHelper) {
 }
 
 # Project-level config: the annotated example ships to the PROJECT's own
-# `.opencode\plugin\config\kdco-notify-win.jsonc` (takes priority over the
+# `.opencode\plugins\config\kdco-notify-win.jsonc` (takes priority over the
 # global `~/.config/opencode/kdco-notify-win.jsonc`). Only written when absent
 # so redeploys never clobber the user's edits. (Global target keeps its global
 # config.) Any stale `kdco-notify.jsonc`/`kdco-notify.json` from the pre-`-win`
 # naming is removed so it can't shadow the new file with old settings.
 if ($Target -ne "global") {
     $projectRoot = Resolve-Path $Target
-    $configDir = Join-Path $projectRoot ".opencode\plugin\config"
+    $configDir = Join-Path $projectRoot ".opencode\plugins\config"
     $configDest = Join-Path $configDir "kdco-notify-win.jsonc"
-    $configSrc = Join-Path $repoRoot ".opencode\plugin\config\kdco-notify-win.jsonc"
+    $configSrc = Join-Path $repoRoot ".opencode\plugins\config\kdco-notify-win.jsonc"
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     if (-not (Test-Path $configDest)) {
         Copy-Item -Force $configSrc $configDest

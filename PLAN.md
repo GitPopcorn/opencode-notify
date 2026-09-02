@@ -239,11 +239,11 @@ opencode-notify/
 
 ## 12. 配置多级化轮（2026-08-06）：项目级 JSONC 配置高优先级 + 日志诊断就绪
 
-> 用户在「重启后双击 ESC 仍弹 NETWORK INTERRUPT」的现场要求把日志等级提到 ALL，并指出：配置不能只放全局一份。项目级部署的插件应把**项目目录下的配置文件**作为高优先级实现；预期路径 `.opencode/plugin/config/kdco-notify.jsonc`；本仓库对应位置留一份带**每个配置详细注释**的范例。
+> 用户在「重启后双击 ESC 仍弹 NETWORK INTERRUPT」的现场要求把日志等级提到 ALL，并指出：配置不能只放全局一份。项目级部署的插件应把**项目目录下的配置文件**作为高优先级实现；预期路径 `.opencode/plugins/config/kdco-notify.jsonc`；本仓库对应位置留一份带**每个配置详细注释**的范例。
 
 ### 12.1 配置解析（项目优先 + JSONC）
 
-- **优先级**（首个存在的文件生效）：`<cwd>/.opencode/plugin/config/kdco-notify.jsonc` → `.../kdco-notify.json` → `~/.config/opencode/kdco-notify.jsonc` → `~/.config/opencode/kdco-notify.json`。`resolveConfigPath()` 遍历候选；`loadConfig`/`buildLoggingConfigLoader` 统一走它（日志热更新也随之切到项目文件）。
+- **优先级**（首个存在的文件生效）：`<cwd>/.opencode/plugins/config/kdco-notify.jsonc` → `.../kdco-notify.json` → `~/.config/opencode/kdco-notify.jsonc` → `~/.config/opencode/kdco-notify.json`。`resolveConfigPath()` 遍历候选；`loadConfig`/`buildLoggingConfigLoader` 统一走它（日志热更新也随之切到项目文件）。
 - **`parseJsonc`**（新导出，4 例测试）：状态机去除 `//`/`/* */` 注释、去除 `}`/`]` 前尾逗号、兼容 UTF-8 BOM；字符串字面量内的 `//`、`,}` 原样保留；坏 JSON 抛出。普通 `.json` 也走同一解析器（无害）。
 
 ### 12.2 日志 `enabled` 开关 + 热更新可恢复
@@ -254,8 +254,8 @@ opencode-notify/
 
 ### 12.3 范例配置
 
-- 本仓库 `.opencode/plugin/config/kdco-notify.jsonc`：**每个配置项**带中文注释（含声音预置、点击三态、日志各档位、心跳参数）；诊断期间 `logging.enabled:true` + `minLogLevel:"ALL"`。
-- `scripts/deploy.ps1`：项目级目标额外把范例拷到 `<target>\.opencode\plugin\config\kdco-notify.jsonc`，仅当目标不存在时写入（不覆盖用户改动）；全局目标不部署配置（沿用全局 `.json`）。
+- 本仓库 `.opencode/plugins/config/kdco-notify.jsonc`：**每个配置项**带中文注释（含声音预置、点击三态、日志各档位、心跳参数）；诊断期间 `logging.enabled:true` + `minLogLevel:"ALL"`。
+- `scripts/deploy.ps1`：项目级目标额外把范例拷到 `<target>\.opencode\plugins\config\kdco-notify.jsonc`，仅当目标不存在时写入（不覆盖用户改动）；全局目标不部署配置（沿用全局 `.json`）。
 
 ### 12.4 核验
 
@@ -291,7 +291,7 @@ opencode-notify/
 
 - 用户要求：项目级配置文件命名统一为 **`kdco-notify-win.jsonc`**（与插件同名，避免与其他工具的 `kdco-notify.json` 混淆），全局配置也换成 **JSONC** 以支持注释。
 - `resolveConfigPath` 候选顺序改为：项目 `kdco-notify-win.jsonc` → `.json` → 旧名 `kdco-notify.jsonc`/`.json`（legacy 兼容）→ 全局 `kdco-notify-win.jsonc` → `.json` → 旧名。
-- 仓库范例 `kdco-notify.jsonc` 重命名为 `.opencode/plugin/config/kdco-notify-win.jsonc`；`deploy.ps1` 改拷新名、写入目标时移除旧名 `kdco-notify.jsonc/.json` 残留（防旧配置遮蔽）。
+- 仓库范例 `kdco-notify.jsonc` 重命名为 `.opencode/plugins/config/kdco-notify-win.jsonc`；`deploy.ps1` 改拷新名、写入目标时移除旧名 `kdco-notify.jsonc/.json` 残留（防旧配置遮蔽）。
 - 全局：新建 `~/.config/opencode/kdco-notify-win.jsonc`（完整注释模板，承继原 `{"iconTheme":"legacy"}`，`logging.enabled:false` 避免全局刷盘），并删除旧 `~/.config/opencode/kdco-notify.json`。
 - 验证：两处部署逐字节一致；`E:\vscode-workspace-temp` 下 `resolveConfigPath()` 正确返回项目 `kdco-notify-win.jsonc`；两个 jsonc 均能过 `parseJsonc`；notify 81 / logger 12 全绿。
 

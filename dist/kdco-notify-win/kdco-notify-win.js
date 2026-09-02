@@ -23,8 +23,8 @@
  *
  * Config file (JSONC with comments, see README / DEFAULT_CONFIG below). Resolved
  * in priority order:
- *   1. `<project>/.opencode/plugin/config/kdco-notify-win.jsonc`  (project-level, high priority)
- *   2. `<project>/.opencode/plugin/config/kdco-notify-win.json`
+ *   1. `<project>/.opencode/plugins/config/kdco-notify-win.jsonc`  (project-level, high priority)
+ *   2. `<project>/.opencode/plugins/config/kdco-notify-win.json`
  *   3. `~/.config/opencode/kdco-notify-win.jsonc`              (global, all projects)
  *   4. `~/.config/opencode/kdco-notify-win.json`
  * (legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same dirs are also
@@ -671,12 +671,12 @@ const DEFAULT_CONFIG = {
 	},
 }
 
-// Project-level config lives under the project's own `.opencode/plugin/config/`
+// Project-level config lives under the project's own `.opencode/plugins/config/`
 // (high priority over the global one) so a project-scoped deployment can carry
 // its own settings without touching `~/.config/opencode/`. Files are named after
 // the plugin (`kdco-notify-win.jsonc`) so the commented template ships next to
 // the plugin and can't be confused with other tools' `kdco-notify.json`.
-const PROJECT_CONFIG_DIR = () => path.join(process.cwd(), ".opencode", "plugin", "config")
+const PROJECT_CONFIG_DIR = () => path.join(process.cwd(), ".opencode", "plugins", "config")
 const GLOBAL_CONFIG_DIR = () => path.join(os.homedir(), ".config", "opencode")
 const CONFIG_CANDIDATES = () => [
 	path.join(PROJECT_CONFIG_DIR(), "kdco-notify-win.jsonc"),
@@ -690,7 +690,7 @@ const CONFIG_CANDIDATES = () => [
 ]
 
 /**
- * Resolve which config file to load. Project-level `.opencode/plugin/config/`
+ * Resolve which config file to load. Project-level `.opencode/plugins/config/`
  * beats the global `~/.config/opencode/`; `kdco-notify-win.jsonc` beats plain
  * `.json` so a commented example is never shadowed by an empty file. Returns
  * null when no config file exists anywhere (pure defaults).

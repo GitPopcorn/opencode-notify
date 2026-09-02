@@ -3,13 +3,13 @@
 // ============================================================================
 //
 // This file is the PROJECT-LEVEL config. When the plugin is deployed into a
-// project it is expected at `.opencode/plugin/config/kdco-notify.jsonc`
+// project it is expected at `.opencode/plugins/config/kdco-notify.jsonc`
 // relative to the project root, and it takes PRIORITY over the global
 // `~/.config/opencode/kdco-notify.json` (or `.jsonc`).
 //
 // Resolution order (first existing file wins):
-//   1. <project>/.opencode/plugin/config/kdco-notify.jsonc   <- you are here
-//   2. <project>/.opencode/plugin/config/kdco-notify.json
+//   1. <project>/.opencode/plugins/config/kdco-notify.jsonc   <- you are here
+//   2. <project>/.opencode/plugins/config/kdco-notify.json
 //   3. ~/.config/opencode/kdco-notify.jsonc
 //   4. ~/.config/opencode/kdco-notify.json
 //
