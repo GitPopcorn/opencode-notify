@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Windows-only native notifications for OpenCode (fork of @kdco/notify, zero OCX, manual vendored)",
   "type": "module",
-  "main": "kdco-notify-win.js",
+  "main": "index.js",
   "private": true,
   "dependencies": {
     "node-notifier": "^10.0.1",

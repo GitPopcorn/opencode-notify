@@ -17,7 +17,7 @@ import assert from "node:assert"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { createNotifyPlugin } from "../dist/kdco-notify-win/kdco-notify-win.js"
+import { createNotifyPlugin } from "../dist/kdco-notify-win/index.js"
 
 const CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "kdco-notify.json")
 const BACKUP = path.join(os.tmpdir(), `kdco-notify-config-backup-${Date.now()}.json`)
@@ -58,7 +58,7 @@ async function main() {
 		// the config file we just wrote (exercising soundOverride + clickProgram).
 		const plugin = await createNotifyPlugin({
 			sendNotification: (opts) => {
-				import("../dist/kdco-notify-win/kdco-notify-win.js")
+				import("../dist/kdco-notify-win/index.js")
 					.then((m) => { m.sendWindowsToast(opts) })
 					.catch(() => {})
 				sentBy.push(opts)

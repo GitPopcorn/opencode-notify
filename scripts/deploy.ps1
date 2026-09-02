@@ -1,17 +1,22 @@
-# Deploy kdco-notify-win to an OpenCode plugins directory.
+# Deploy kdco-notify-win to an OpenCode config directory.
 #
-# IMPORTANT: OpenCode only auto-loads plugins that are DIRECT .js/.ts files in
-# the plugins directory (or its config dir). It does NOT recurse into
-# subdirectories. So this script flattens the plugin package's contents
-# (the .js entry + vendored node_modules + assets) into the plugins root.
+# OpenCode loads plugins in ONE of two ways:
+#   1. AUTO-DISCOVERY of direct .js/.ts files in the plugins dir — NOT used here.
+#   2. EXPLICIT `plugin` array in opencode.json(c) — this is how we register.
+#
+# Because kdco-notify-win is registered explicitly (config-managed: remove the
+# entry to disable), the whole plugin package is deployed as a SUBDIRECTORY:
+#   <config-dir>/plugins/kdco-notify-win/  (index.js + node_modules + assets)
+# and opencode.json(c) references it via a file:// URL with optional tuple
+# options (P1/P3).
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target global
 #   powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target "E:\path\to\project"
 
 param(
-    # "global" (-> ~/.config/opencode/plugins) or an absolute project dir whose
-    # `.opencode\plugins` will receive the plugin.
+    # "global" (-> ~/.config/opencode) or an absolute project dir whose
+    # `.opencode` will receive the plugin.
     [string]$Target = "global"
 )
 
@@ -19,40 +24,43 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $repoRoot "dist\kdco-notify-win"
+$id = "kdco-notify-win"
 
 if ($Target -eq "global") {
-    $pluginsDir = Join-Path $HOME ".config\opencode\plugins"
+    $configRoot = Join-Path $HOME ".config\opencode"
 } else {
-    $pluginsDir = Join-Path (Resolve-Path $Target) ".opencode\plugins"
+    $configRoot = Resolve-Path (Join-Path $Target ".opencode")
 }
 
-Write-Host "Deploying to: $pluginsDir"
+$pluginsDir = Join-Path $configRoot "plugins"
+$dest = Join-Path $pluginsDir $id
+
+Write-Host "Deploying to: $dest"
 
 if (-not (Test-Path $src)) { throw "Source package not found: $src" }
-New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
 
-# Flatten: entry .js, plugin-logger.js, node_modules, assets go straight into the
-# plugins root.
-Copy-Item -Force (Join-Path $src "kdco-notify-win.js") $pluginsDir
-Copy-Item -Force (Join-Path $src "plugin-logger.js") $pluginsDir
-Copy-Item -Recurse -Force (Join-Path $src "assets") $pluginsDir
-Copy-Item -Recurse -Force (Join-Path $src "node_modules") $pluginsDir
+# Whole package folder: index.js, plugin-logger.js, package.json, node_modules,
+# assets, config/ (bundled P6 default). Replacing the folder wholesale would
+# clobber the bundled config; copy contents so a redeploy refreshes code but
+# keeps any user tweak in config/ (config is the plugin's own dir, not a
+# user-edited project/global config location).
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Copy-Item -Force (Join-Path $src "index.js") $dest
+Copy-Item -Force (Join-Path $src "plugin-logger.js") $dest
+Copy-Item -Force (Join-Path $src "package.json") $dest
+Copy-Item -Recurse -Force (Join-Path $src "node_modules") (Join-Path $dest "node_modules")
+Copy-Item -Recurse -Force (Join-Path $src "assets") (Join-Path $dest "assets")
+New-Item -ItemType Directory -Force -Path (Join-Path $dest "config") | Out-Null
+$bundledCfg = Join-Path $src "config\kdco-notify-win.jsonc"
+$bundledDest = Join-Path $dest "config\kdco-notify-win.jsonc"
+if (Test-Path $bundledCfg) { Copy-Item -Force $bundledCfg $bundledDest }
 
-# Remove any leftover click-helper script from older deploys (the helper-based
-# jump-to-opencode approach was removed; click-to-open now uses clickMode
-# "program"/"native" inside the plugin).
-$leftoverHelper = Join-Path $pluginsDir "jump-to-opencode.ps1"
-if (Test-Path -LiteralPath $leftoverHelper) {
-    Remove-Item -LiteralPath $leftoverHelper -Force
-    Write-Host "  removed leftover helper: jump-to-opencode.ps1"
-}
-
-# Project-level config: the annotated example ships to the PROJECT's own
-# `.opencode\plugins\config\kdco-notify-win.jsonc` (takes priority over the
-# global `~/.config/opencode/kdco-notify-win.jsonc`). Only written when absent
-# so redeploys never clobber the user's edits. (Global target keeps its global
-# config.) Any stale `kdco-notify.jsonc`/`kdco-notify.json` from the pre-`-win`
-# naming is removed so it can't shadow the new file with old settings.
+# Project-level config (P2): the annotated example ships to the PROJECT's own
+# `.opencode\plugins\config\kdco-notify-win.jsonc`, higher priority than the
+# global file (P5). Only written when absent so redeploys never clobber the
+# user's edits. (Global target keeps its global config.) Any stale
+# `kdco-notify.jsonc`/`kdco-notify.json` is removed so it can't shadow the new
+# file with old settings.
 if ($Target -ne "global") {
     $projectRoot = Resolve-Path $Target
     $configDir = Join-Path $projectRoot ".opencode\plugins\config"
@@ -74,8 +82,23 @@ if ($Target -ne "global") {
     }
 }
 
-Write-Host "Done. Restart OpenCode to load the plugin."
-Write-Host "  entry:     $pluginsDir\kdco-notify-win.js"
-Write-Host "  logger:    $pluginsDir\plugin-logger.js"
-Write-Host "  assets:    $pluginsDir\assets"
-Write-Host "  deps:      $pluginsDir\node_modules"
+# Old flat deploys put files directly in the plugins root; clean those up so a
+# stale entry .js/plugin-logger.js can't shadow the new config-managed install.
+foreach ($stale in @("kdco-notify-win.js", "plugin-logger.js", "jump-to-opencode.ps1")) {
+    $stalePath = Join-Path $pluginsDir $stale
+    if (Test-Path -LiteralPath $stalePath) {
+        Remove-Item -LiteralPath $stalePath -Force
+        Write-Host "  removed stale flat deploy: $stalePath"
+    }
+}
+
+$entryUrl = ($dest -replace "\\", "/").Replace(" ", "%20")
+Write-Host ""
+Write-Host "Done. Register in opencode.json(c) to enable (remove the entry to disable):"
+Write-Host '  "plugin": ['
+Write-Host "    [\"file:///$entryUrl/index.js\", { /* P1/P3 options */ }]"
+Write-Host '  ]'
+Write-Host ""
+Write-Host "  package:   $dest"
+Write-Host "  entry:     $dest\index.js"
+Write-Host "  bundled:   $dest\config\kdco-notify-win.jsonc (P6 default)"

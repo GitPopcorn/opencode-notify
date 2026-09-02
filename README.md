@@ -4,11 +4,11 @@
 
 A plugin for [OpenCode](https://github.com/sst/opencode) that delivers Windows Toast notifications when tasks complete, errors occur, the AI needs your input, or the network connection is interrupted.
 
-This is a **Windows 10/11-only** fork. All macOS (alerter / focus detection), Linux (`notify-send`), and cmux paths have been removed. One JS file + two runtime npm packages, dropped straight into the plugins directory — no OCX, no build step.
+This is a **Windows 10/11-only** fork. All macOS (alerter / focus detection), Linux (`notify-send`), and cmux paths have been removed. One JS file + two runtime npm packages, no OCX, no build step.
 
-## Install (offline-friendly)
+## Install (offline-friendly, config-managed)
 
-> **Critical:** OpenCode only auto-loads plugins that are **direct `.js`/`.ts` files** in the plugins directory. It does **NOT** recurse into subdirectories. So the plugin files must be flattened into the plugins root — not nested in a `kdco-notify-win/` subfolder.
+> **How it loads:** this plugin is **not** auto-discovered. OpenCode only auto-loads *direct* `.js`/`.ts` files in the plugins root — so by deploying as a **subdirectory** and registering it explicitly in `opencode.json(c)`, you get a plugin you can **enable / disable from config** (remove the `plugin` entry to disable; no file deletion needed).
 
 ### One-command deploy (recommended)
 
@@ -20,34 +20,49 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target global
 powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Target "E:\path\to\project"
 ```
 
-Resulting layout (this is what must be in the plugins root):
+Resulting layout (the whole package lives in a `kdco-notify-win/` subdirectory):
 
 ```
-~/.config/opencode/plugins/          (or .opencode/plugins/)
-├── kdco-notify-win.js     # entry — auto-loaded
-├── plugin-logger.js       # generic file logger (Diagnostic instrumentation)
-├── assets/                # icon + banner
-└── node_modules/          # vendored node-notifier + detect-terminal
+~/.config/opencode/plugins/kdco-notify-win/     (or .opencode/plugins/kdco-notify-win/)
+├── index.js            # entry — V1 { id, server } (export default)
+├── plugin-logger.js    # generic file logger (Diagnostic instrumentation)
+├── package.json        # deps: node-notifier + detect-terminal
+├── node_modules/       # vendored (offline-ready)
+├── assets/             # icon + banner
+└── config/
+    └── kdco-notify-win.jsonc   # bundled default (P6)
 ```
+
+Then **register** it in your OpenCode config (`~/.config/opencode/opencode.json(c)` global, or `<project>/opencode.json(c)` project):
+
+```jsonc
+{
+  "plugin": [
+    ["file:///C:/Users/YOU/.config/opencode/plugins/kdco-notify-win/index.js", {
+      // P1/P3 options — optional, highest priority
+    }]
+  ]
+}
+```
+
+Remove the entry to disable the plugin. `deploy.ps1` prints the exact `file://` URL to paste.
 
 ### Manual copy
 
 ```powershell
-# Copy the flattened contents INTO the plugins root (not as a subfolder)
-copy dist\kdco-notify-win\kdco-notify-win.js  %USERPROFILE%\.config\opencode\plugins\
-copy dist\kdco-notify-win\plugin-logger.js %USERPROFILE%\.config\opencode\plugins\
-xcopy dist\kdco-notify-win\node_modules       %USERPROFILE%\.config\opencode\plugins\node_modules\ /E
-xcopy dist\kdco-notify-win\assets             %USERPROFILE%\.config\opencode\plugins\assets\ /E
+# Copy the whole package dir INTO the plugins dir (as a subdir)
+xcopy dist\kdco-notify-win  %USERPROFILE%\.config\opencode\plugins\kdco-notify-win\ /E
 
+# Then add the "plugin" entry above to your opencode.json(c)
 # 2. Restart OpenCode (plugins load at startup)
 ```
 
 Global vs project scope:
 
-| Scope | Entry file location |
+| Scope | Package location |
 |---|---|
-| Global (all projects) | `~/.config/opencode/plugins/kdco-notify-win.js` |
-| Project-only | `.opencode/plugins/kdco-notify-win.js` |
+| Global (all projects) | `~/.config/opencode/plugins/kdco-notify-win/` |
+| Project-only | `.opencode/plugins/kdco-notify-win/` |
 
 The plugin loads standalone even if deps are missing, but logs a warning instead of crashing. `dist/kdco-notify-win/node_modules` is already vendored; re-run `npm install` there only if you change deps.
 
@@ -98,16 +113,46 @@ A network failure must not be followed by a "READY FOR REVIEW" toast for the sam
 
 ## Configuration (Optional)
 
-Works out of the box. Config is **JSONC** (comments + trailing commas allowed) and is resolved in priority order:
+Works out of the box. Config is **JSONC** (comments + trailing commas allowed) and is resolved along a **priority chain** (low → high, deep-merged key by key — object keys recurse, arrays are replaced wholesale):
 
-| Priority | File | Scope |
+| Priority | Source | Scope |
 |---|---|---|
-| 1 | `<project>/.opencode/plugins/config/kdco-notify-win.jsonc` | Project-level (a project-scoped deployment carries its own settings) |
-| 2 | `<project>/.opencode/plugins/config/kdco-notify-win.json` | Project-level (plain JSON) |
-| 3 | `~/.config/opencode/kdco-notify-win.jsonc` | Global (all projects) |
-| 4 | `~/.config/opencode/kdco-notify-win.json` | Global (plain JSON) |
+| P1+P3 | `opencode.json(c)` `plugin` tuple options (server's 2nd arg) | **Official channel, highest** — global + project |
+| P2 | `<project>/.opencode/plugins/config/kdco-notify-win.jsonc` | Project-level file |
+| P5 | `~/.config/opencode/kdco-notify-win.jsonc` | Global file (all projects) |
+| P6 | `<plugin-dir>/config/kdco-notify-win.jsonc` | Bundled default (ships with plugin) |
+| P7 | code `DEFAULT_CONFIG` | Base defaults |
 
-Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same directories are also honored (after the `-win` names). The first existing file wins. An annotated template with **every option documented inline** ships as `.opencode/plugins/config/kdco-notify-win.jsonc` (deployed to a project target by `scripts/deploy.ps1`, written only if missing so your edits survive redeploys; a matching `kdco-notify-win.jsonc` also exists at the global path, pre-filled with your old settings and comments). `logging` hot-reloads on file change; the rest applies on OpenCode restart.
+Higher layers override lower ones **per key** (they do not replace the whole object). Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same directories are also honored (after the `-win` names).
+
+Example — official tuple options (P1/P3, highest priority):
+
+```jsonc
+// opencode.json(c)
+{
+  "plugin": [
+    ["file:///.../kdco-notify-win/index.js", {
+      "notifyChildSessions": true,
+      "showSummary": false,
+      "sounds": { "idle": "Notification.IM" }
+    }]
+  ]
+}
+```
+
+Example — a global file (P5) that a project file (P2) can partially override:
+
+```jsonc
+// ~/.config/opencode/kdco-notify-win.jsonc
+{ "showTimestamp": false, "sounds": { "idle": "Notification.IM" } }
+```
+
+```jsonc
+// <project>/.opencode/plugins/config/kdco-notify-win.jsonc  (project overrides P5)
+{ "sounds": { "idle": "Notification.Mail" } }   // only idle changes; error/network stay as P5
+```
+
+An annotated template with **every option documented inline** ships as `<plugin-dir>/config/kdco-notify-win.jsonc` (bundled P6 default). For a project target, `scripts/deploy.ps1` also writes an annotated example to `.opencode/plugins/config/kdco-notify-win.jsonc` (P2) — only if missing, so your edits survive redeploys. `logging` hot-reloads on file change; the rest applies on OpenCode restart.
 
 ```jsonc
 {
@@ -173,7 +218,7 @@ Notes:
 
 ## Development
 
-This repo has no build tooling — the plugin in `dist/kdco-notify-win/kdco-notify-win.js` is both source and deliverable (Bun runs ESM JS directly).
+This repo has no build tooling — the plugin in `dist/kdco-notify-win/index.js` is both source and deliverable (Bun runs ESM JS directly).
 
 ```bash
 # Self-test (no real notifier / OpenCode needed; fakes are injected)

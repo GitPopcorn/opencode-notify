@@ -15,7 +15,7 @@
  *   5. QUESTION FOR YOU        (blue banner)    question.asked
  */
 import assert from "node:assert"
-import { createNotifyPlugin } from "../dist/kdco-notify-win/kdco-notify-win.js"
+import { createNotifyPlugin } from "../dist/kdco-notify-win/index.js"
 
 // Sleep so each toast is visible (and cross toasts don't crowd the action center).
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -74,7 +74,7 @@ async function main() {
 		readConfig: async () => config,
 		sendNotification: (opts) => {
 			// Re-inject through the real sender (same as the default wiring).
-			import("../dist/kdco-notify-win/kdco-notify-win.js")
+			import("../dist/kdco-notify-win/index.js")
 				.then((m) => { m.sendWindowsToast(opts) })
 				.catch(() => {})
 			sentBy.push(opts)

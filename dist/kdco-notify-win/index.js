@@ -22,14 +22,15 @@
  *   3. Restart OpenCode.
  *
  * Config file (JSONC with comments, see README / DEFAULT_CONFIG below). Resolved
- * in priority order:
- *   1. `<project>/.opencode/plugins/config/kdco-notify-win.jsonc`  (project-level, high priority)
- *   2. `<project>/.opencode/plugins/config/kdco-notify-win.json`
- *   3. `~/.config/opencode/kdco-notify-win.jsonc`              (global, all projects)
- *   4. `~/.config/opencode/kdco-notify-win.json`
- * (legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same dirs are also
- * honored.) An annotated template with every option documented ships beside the
- * plugin as `kdco-notify-win.jsonc`.
+ * along a priority chain (low → high, deep-merged key by key):
+ *   P7  code DEFAULT_CONFIG
+ *   P6  bundled default <plugin-dir>/config/kdco-notify-win.jsonc
+ *   P5  global ~/.config/opencode/kdco-notify-win.jsonc
+ *   P2  project .opencode/plugins/config/kdco-notify-win.jsonc
+ *   P1+P3  opencode.json(c) `plugin` tuple options (server's 2nd arg, highest)
+ * Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same dirs are also
+ * honored. An annotated template with every option documented ships inside the
+ * plugin dir as `config/kdco-notify-win.jsonc`.
  */
 
 import * as fs from "node:fs/promises"
@@ -69,20 +70,38 @@ function safeStringify(value, maxChars = 2000) {
 }
 
 /**
+ * Compute a monotonic "config version" from the current chain layers (sum of
+ * mtimes, or 0 when no file exists). Any file-layer change bumps the version,
+ * which is what drives hot reload.
+ * @returns {{version:number, layers:{path:string,kind:string}[]}}
+ */
+function configVersion() {
+	const layers = resolveConfigLayers()
+	let version = 0
+	for (const layer of layers) {
+		try { version += fsSync.statSync(layer.path).mtimeMs } catch {}
+	}
+	return { version, layers }
+}
+
+/**
  * Build a synchronous config-loader for PluginLogger that hot-reloads the
- * `logging` section of the resolved config file whenever it changes (mtime).
+ * `logging` section whenever ANY config-chain file changes (mtime). Only the
+ * `logging` block is returned — the logger doesn't need the rest.
  * @returns {{version:number, config:object}|null}
  */
 function buildLoggingConfigLoader() {
 	return () => {
-		const configPath = resolveConfigPath()
-		if (!configPath) return null
 		try {
-			const stat = fsSync.statSync(configPath)
-			let content = fsSync.readFileSync(configPath, "utf8")
-			const userConfig = parseJsonc(content)
-			const logging = { ...DEFAULT_CONFIG.logging, ...(userConfig.logging ?? {}) }
-			return { version: stat.mtimeMs, config: logging }
+			const { version } = configVersion()
+			const layers = resolveConfigLayers()
+			let logging = { ...DEFAULT_CONFIG.logging }
+			for (const layer of layers) {
+				const content = fsSync.readFileSync(layer.path, "utf8")
+				const parsed = parseJsonc(content)
+				logging = deepMerge(logging, parsed.logging ?? {})
+			}
+			return { version, config: logging }
 		} catch {
 			return null
 		}
@@ -676,31 +695,97 @@ const DEFAULT_CONFIG = {
 // its own settings without touching `~/.config/opencode/`. Files are named after
 // the plugin (`kdco-notify-win.jsonc`) so the commented template ships next to
 // the plugin and can't be confused with other tools' `kdco-notify.json`.
+// ---------------------------------------------------------------------------
+// Config resolution (P1–P7 chain)
+//
+// Low → high priority, deep-merged key by key (object keys recurse; arrays are
+// replaced wholesale). Official opencode.json(c) tuple options (P1/P3) are the
+// highest-priority layer and are merged last at runtime.
+//   P7  code DEFAULT_CONFIG                       (base)
+//   P6  <plugin-dir>/config/kdco-notify-win.jsonc (bundled, ships with plugin)
+//   P5  ~/.config/opencode/kdco-notify-win.jsonc  (global file)
+//   P2  .opencode/plugins/config/kdco-notify-win.jsonc (project file)
+//   P1+P3  opencode.json(c) `plugin` tuple options (server's 2nd arg, highest)
+// ---------------------------------------------------------------------------
+const PLUGIN_ID = "kdco-notify-win"
+const BUNDLED_CONFIG_DIR = () => path.join(PLUGIN_DIR, "config")
 const PROJECT_CONFIG_DIR = () => path.join(process.cwd(), ".opencode", "plugins", "config")
 const GLOBAL_CONFIG_DIR = () => path.join(os.homedir(), ".config", "opencode")
-const CONFIG_CANDIDATES = () => [
-	path.join(PROJECT_CONFIG_DIR(), "kdco-notify-win.jsonc"),
-	path.join(PROJECT_CONFIG_DIR(), "kdco-notify-win.json"),
-	path.join(PROJECT_CONFIG_DIR(), "kdco-notify.jsonc"), // legacy
-	path.join(PROJECT_CONFIG_DIR(), "kdco-notify.json"),   // legacy
-	path.join(GLOBAL_CONFIG_DIR(), "kdco-notify-win.jsonc"),
-	path.join(GLOBAL_CONFIG_DIR(), "kdco-notify-win.json"),
-	path.join(GLOBAL_CONFIG_DIR(), "kdco-notify.jsonc"),   // legacy
-	path.join(GLOBAL_CONFIG_DIR(), "kdco-notify.json"),    // legacy
-]
+
+// Per-directory candidate filenames, newest convention first (legacy names last).
+const CONFIG_FILENAMES = ["kdco-notify-win.jsonc", "kdco-notify-win.json", "kdco-notify.jsonc", "kdco-notify.json"]
+const bundledCandidates = () => CONFIG_FILENAMES.map((f) => path.join(BUNDLED_CONFIG_DIR(), f))
+const globalCandidates = () => CONFIG_FILENAMES.map((f) => path.join(GLOBAL_CONFIG_DIR(), f))
+const projectCandidates = () => CONFIG_FILENAMES.map((f) => path.join(PROJECT_CONFIG_DIR(), f))
+
+/** First existing file from a candidate list, else null. @returns {string|null} */
+function firstExisting(candidates) {
+	for (const c of candidates) if (fsSync.existsSync(c)) return c
+	return null
+}
 
 /**
- * Resolve which config file to load. Project-level `.opencode/plugins/config/`
- * beats the global `~/.config/opencode/`; `kdco-notify-win.jsonc` beats plain
- * `.json` so a commented example is never shadowed by an empty file. Returns
- * null when no config file exists anywhere (pure defaults).
+ * Resolve every config file layer that exists, in low→high priority order.
+ * Each layer is `{ path, kind }` where kind is "bundled" | "global" | "project".
+ * @returns {{path:string, kind:string}[]}
+ */
+export function resolveConfigLayers() {
+	const layers = []
+	const bundled = firstExisting(bundledCandidates())
+	if (bundled) layers.push({ path: bundled, kind: "bundled" })
+	const global = firstExisting(globalCandidates())
+	if (global) layers.push({ path: global, kind: "global" })
+	const project = firstExisting(projectCandidates())
+	if (project) layers.push({ path: project, kind: "project" })
+	return layers
+}
+
+/**
+ * Highest-priority config file path (for logging / display). Returns null when
+ * no file exists anywhere (pure defaults).
  * @returns {string|null}
  */
 export function resolveConfigPath() {
-	for (const candidate of CONFIG_CANDIDATES()) {
-		if (fsSync.existsSync(candidate)) return candidate
+	const layers = resolveConfigLayers()
+	return layers.length ? layers[layers.length - 1].path : null
+}
+
+/**
+ * Deep merge `over` onto `base` and return a new object. Object keys recurse
+ * (per-key), arrays and scalars are replaced wholesale. Neither input mutated.
+ */
+export function deepMerge(base, over) {
+	if (over === undefined || over === null) return base
+	if (Array.isArray(over)) return over
+	if (typeof over !== "object") return over
+	if (base === null || typeof base !== "object" || Array.isArray(base)) {
+		// Non-object base: overlay over's own enumerable keys.
+		const out = {}
+		for (const k of Object.keys(over)) out[k] = deepMerge(undefined, over[k])
+		return out
 	}
-	return null
+	const out = { ...base }
+	for (const k of Object.keys(over)) out[k] = deepMerge(base[k], over[k])
+	return out
+}
+
+/**
+ * Load plugin config along the P1–P7 chain.
+ * @param {object} [options] Official opencode.json(c) tuple options (P1/P3, highest).
+ * @returns {Promise<object>}
+ */
+export async function loadConfig(options = {}) {
+	let config = { ...DEFAULT_CONFIG }
+	for (const layer of resolveConfigLayers()) {
+		try {
+			const content = await fs.readFile(layer.path, "utf8")
+			config = deepMerge(config, parseJsonc(content))
+		} catch {
+			// Unreadable/broken layer -> skip (keep defaults / lower layers)
+		}
+	}
+	config = deepMerge(config, options)
+	return config
 }
 
 /**
@@ -744,26 +829,6 @@ export function parseJsonc(content) {
 		out += c; i++
 	}
 	return JSON.parse(out)
-}
-
-async function loadConfig() {
-	const configPath = resolveConfigPath()
-	if (!configPath) return { ...DEFAULT_CONFIG }
-	try {
-		let content = await fs.readFile(configPath, "utf8")
-		const userConfig = parseJsonc(content)
-		return {
-			...DEFAULT_CONFIG,
-			...userConfig,
-			sounds: { ...DEFAULT_CONFIG.sounds, ...userConfig.sounds },
-			quietHours: { ...DEFAULT_CONFIG.quietHours, ...userConfig.quietHours },
-			heartbeat: { ...DEFAULT_CONFIG.heartbeat, ...userConfig.heartbeat },
-			logging: { ...DEFAULT_CONFIG.logging, ...userConfig.logging },
-		}
-	} catch {
-		// Missing or invalid config -> defaults
-		return { ...DEFAULT_CONFIG }
-	}
 }
 
 // ==========================================
@@ -1347,10 +1412,10 @@ export function createNotifyPlugin(overrides = {}) {
 		now = () => Date.now(),
 	} = overrides
 
-	return async function NotifyPlugin(ctx) {
+	return async function NotifyPlugin(ctx, options = {}) {
 		const { client } = ctx ?? {}
 
-		const config = await readConfig()
+		const config = await readConfig(options)
 
 		// Bootstrap the generic logger (once). Min level defaults to WARN so normal
 		// running writes almost nothing; set logging.minLogLevel:"ALL" to capture
@@ -1869,7 +1934,17 @@ function buildQuestionKey(props) {
 }
 
 // ==========================================
-// PLUGIN EXPORT
+// PLUGIN EXPORT (V1 object form, official OpenCode standard)
 // ==========================================
-
-export default createNotifyPlugin()
+//
+// OpenCode V1 expects `export default { id, server }` (or `{ id, tui }`).
+// `id` is required for file plugins (resolvePluginId) and must match the
+// deploy dir name (see README "ID consistency"). `server` receives the
+// official opencode.json(c) `plugin` tuple options as its 2nd argument —
+// those options are merged last (P1/P3, highest priority) into the config.
+export default {
+	id: PLUGIN_ID,
+	server: async (ctx, options) => {
+		return createNotifyPlugin()(ctx, options)
+	},
+}

@@ -301,3 +301,37 @@ opencode-notify/
 - [x] `node test/notify.test.mjs` **83 passed**（+2：真实 `MessageAbortedError` payload → user-cancel、带真实连接特征的 `MessageAbortedError` → network）；logger 12 passed。
 - [x] 部署两处 + 逐字节校验。
 - 现场复测：重启后双击 ESC → 只弹 STOPPED BY YOU（或静默），日志应见 `L2002 categorized=user-cancel name=messageabortederror`。
+
+## 14. 架构迁移轮（2026-09-02）：config 可管理 + P1–P7 配置链 + 目录部署
+
+> 依据 `E:\vscode-workspace-temp\docs\tech\2026-09-02-[OpenCode]...大全整理.md` §6 推荐架构。用户核心目的排序：**纯离线 + 各自负责 + 易迁移组装**；官方标准只是顺带。本轮彻底放弃"零配置自动发现"，改为 **opencode.jsonc 显式注册**（屏蔽 = 删/注释 `plugin` 条目，不再删文件）。
+
+### 14.1 目标架构（P1–P7 配置链）
+
+```
+P1+P3  opencode.json(c) `plugin` 元组 options   ← 官方通道，server 第二参数，最高优先级
+P2     项目 .opencode/plugins/config/kdco-notify-win.jsonc
+P5     全局 ~/.config/opencode/kdco-notify-win.jsonc（P4 路径弃用，全局文件保留 P5）
+P6     插件内置 <plugin-dir>/config/kdco-notify-win.jsonc（bundled 默认）
+P7     代码 DEFAULT_CONFIG
+```
+
+- 深合并：自低向高逐键（对象递归、数组整体替换），`deepMerge()` 新导出（4 例测试）。
+- 热更：仅 `logging` 段（`buildLoggingConfigLoader` 改为基于整条链的 mtime 版本号）；其余配置重启生效（闭包架构下全配置热更收益/风险比不佳，README 已声明）。
+
+### 14.2 落地改动
+
+- [x] `dist/kdco-notify-win/kdco-notify-win.js` → **`index.js`**（`git mv` 保留历史）+ package.json `main` 同步。
+- [x] 导出改 **V1 对象形态** `export default { id: "kdco-notify-win", server: async (ctx, options) => ... }`（id 与部署目录名一致）。
+- [x] `server` 接收官方元组 options，作为最高优先级合并进配置链。
+- [x] 配置解析重写：`resolveConfigLayers()` / `loadConfig(options)` / `deepMerge()` / `configVersion()`；`resolveConfigPath()` 保留（取最高层文件，供热更/日志）。
+- [x] deploy.ps1 改**目录部署**：整个 `dist/kdco-notify-win/` → `plugins/kdco-notify-win/` 子目录（index.js + plugin-logger + package.json + node_modules + assets + config/）；清理旧的平铺残留（`kdco-notify-win.js` / `plugin-logger.js` / `jump-to-opencode.ps1`）；输出 opencode.jsonc 注册提示（file:// URL）。
+- [x] 新增 bundled 默认 `dist/kdco-notify-win/config/kdco-notify-win.jsonc`（P6，纯默认 + 注释，`logging.enabled:false` 避免刷盘）。
+- [x] README 重写 Install（config-managed 目录部署 + opencode.jsonc 注册示例）与 Configuration（P1–P7 链表 + 元组 options 示例 + 深合并语义）。
+- [x] 测试：import 路径改 `index.js`；新增 `deepMerge` / `resolveConfigLayers` / `loadConfig` 链测试。
+
+### 14.3 待办 / 现场
+
+- [ ] 重新部署全局 + 项目两处，验证 `opencode.jsonc` 注册后 Status 面板正确显示插件名（依赖 OpenCode 上游 W1 修复，Windows file:// basename bug）。
+- [ ] 提交本轮改动（分支 `dev`）。
+- 说明：`%USERPROFILE%` 全局目录自始至终未在本轮被脚本写入（deploy 未执行，仅改仓库内文件）。

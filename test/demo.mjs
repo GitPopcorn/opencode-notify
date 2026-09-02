@@ -7,7 +7,7 @@
  * Run:   node test/demo.mjs
  * Expected: a Windows Toast notification pops up.
  */
-import { createNotifyPlugin } from "../dist/kdco-notify-win/kdco-notify-win.js"
+import { createNotifyPlugin } from "../dist/kdco-notify-win/index.js"
 
 const plugin = await createNotifyPlugin({
 	readConfig: async () => ({

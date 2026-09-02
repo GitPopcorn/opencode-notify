@@ -1,5 +1,5 @@
 /**
- * Self-test for kdco-notify-win.js
+ * Self-test for kdco-notify-win (index.js)
  * =================================
  * Runs the plugin with injected fakes (fake notifier / client / clock) so no
  * real node-notifier binary or OpenCode instance is required.
@@ -24,7 +24,11 @@ import {
 	parseActivationPayload,
 	substitutePlaceholders,
 	parseJsonc,
-} from "../dist/kdco-notify-win/kdco-notify-win.js"
+	deepMerge,
+	resolveConfigLayers,
+	resolveConfigPath,
+	loadConfig,
+} from "../dist/kdco-notify-win/index.js"
 
 let passed = 0
 let failed = 0
@@ -161,6 +165,101 @@ async function main() {
 	await test("parseJsonc fails loudly on broken JSON", () => {
 		assert.throws(() => parseJsonc("{ not json }"))
 	})
+
+	console.log("deepMerge / config chain:")
+	await test("deepMerge scalars, nested objects, arrays, new keys", () => {
+		assert.deepEqual(deepMerge({ a: 1, b: 2 }, { b: 3 }), { a: 1, b: 3 })
+		assert.deepEqual(deepMerge({ s: { x: 1, y: 2 } }, { s: { y: 3 } }), { s: { x: 1, y: 3 } })
+		assert.deepEqual(deepMerge({ a: [1, 2] }, { a: [9] }), { a: [9] })
+		assert.deepEqual(deepMerge({ a: 1 }, { b: 2 }), { a: 1, b: 2 })
+	})
+	await test("deepMerge does not mutate inputs", () => {
+		const base = { a: 1, s: { x: 1 } }
+		const over = { a: 2, s: { y: 2 } }
+		const out = deepMerge(base, over)
+		assert.deepEqual(out, { a: 2, s: { x: 1, y: 2 } })
+		assert.deepEqual(base, { a: 1, s: { x: 1 } })
+		assert.deepEqual(over, { a: 2, s: { y: 2 } })
+	})
+	await test("deepMerge treats undefined override as no-op", () => {
+		assert.deepEqual(deepMerge({ a: 1 }, undefined), { a: 1 })
+		assert.deepEqual(deepMerge({ a: 1 }, null), { a: 1 })
+	})
+
+	// Config chain isolation: fake cwd + fake home, then restore.
+	const cfgOrigCwd = process.cwd()
+	const cfgOrigHome = process.env.USERPROFILE || process.env.HOME || ""
+	const cfgRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kdco-cfg-"))
+	const cfgHome = path.join(cfgRoot, "home")
+	const cfgProj = path.join(cfgRoot, "project")
+	fs.mkdirSync(cfgHome, { recursive: true })
+	fs.mkdirSync(cfgProj, { recursive: true })
+	process.env.USERPROFILE = cfgHome
+	process.env.HOME = cfgHome
+	process.chdir(cfgProj)
+	function cfgCleanup() {
+		try { process.chdir(cfgOrigCwd) } catch {}
+		if (cfgOrigHome) {
+			process.env.USERPROFILE = cfgOrigHome
+			process.env.HOME = cfgOrigHome
+		}
+		try { fs.rmSync(cfgRoot, { recursive: true, force: true }) } catch {}
+	}
+	function cfgRm(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch {} }
+
+	await test("bundled default (P6) is always present; no other layers when nothing else exists", () => {
+		cfgRm(path.join(cfgProj, ".opencode"))
+		cfgRm(path.join(cfgHome, ".config"))
+		const layers = resolveConfigLayers()
+		assert.ok(layers.length >= 1, "bundled P6 layer should always be present")
+		assert.equal(layers[0].kind, "bundled")
+	})
+	await test("global file alone -> bundled + global layers, loadConfig merges them", async () => {
+		cfgRm(path.join(cfgHome, ".config"))
+		const globalDir = path.join(cfgHome, ".config", "opencode")
+		fs.mkdirSync(globalDir, { recursive: true })
+		fs.writeFileSync(path.join(globalDir, "kdco-notify-win.jsonc"), '{ "showTimestamp": false, "sounds": { "idle": "Notification.IM" } }')
+		const layers = resolveConfigLayers()
+		assert.ok(layers.some((l) => l.kind === "global"), "expected a global layer")
+		const cfg = await loadConfig()
+		assert.equal(cfg.showTimestamp, false)
+		assert.equal(cfg.sounds.idle, "Notification.IM")
+		assert.equal(cfg.notifyChildSessions, false) // default survives
+	})
+	await test("project file overrides global per-key (not wholesale)", async () => {
+		const globalDir = path.join(cfgHome, ".config", "opencode")
+		fs.writeFileSync(path.join(globalDir, "kdco-notify-win.jsonc"), '{ "showTimestamp": false, "showSummary": true, "sounds": { "idle": "Notification.IM" } }')
+		const projDir = path.join(cfgProj, ".opencode", "plugins", "config")
+		fs.mkdirSync(projDir, { recursive: true })
+		fs.writeFileSync(path.join(projDir, "kdco-notify-win.jsonc"), '{ "sounds": { "idle": "Notification.Mail" } }')
+		const layers = resolveConfigLayers()
+		assert.deepEqual(layers.map((l) => l.kind), ["bundled", "global", "project"])
+		const cfg = await loadConfig()
+		// project only overrode sounds.idle; showTimestamp stays false (global), showSummary stays true (global)
+		assert.equal(cfg.sounds.idle, "Notification.Mail")
+		assert.equal(cfg.showTimestamp, false)
+		assert.equal(cfg.showSummary, true)
+	})
+	await test("official options (P1/P3) are the highest-priority layer", async () => {
+		const projDir = path.join(cfgProj, ".opencode", "plugins", "config")
+		fs.writeFileSync(path.join(projDir, "kdco-notify-win.jsonc"), '{ "showSummary": false }')
+		const cfg = await loadConfig({ showSummary: true, summarySteps: 5 })
+		assert.equal(cfg.showSummary, true)
+		assert.equal(cfg.summarySteps, 5)
+	})
+	await test("resolveConfigPath returns highest layer (project)", () => {
+		const p = resolveConfigPath()
+		assert.ok(p && p.includes("project"), `expected project path, got ${p}`)
+	})
+	await test("legacy kdco-notify.jsonc is honored (global)", async () => {
+		const globalDir = path.join(cfgHome, ".config", "opencode")
+		cfgRm(path.join(globalDir, "kdco-notify-win.jsonc"))
+		cfgRm(path.join(cfgProj, ".opencode"))
+		fs.writeFileSync(path.join(globalDir, "kdco-notify.jsonc"), '{ "notifyChildSessions": true }')
+		const cfg = await loadConfig()
+		assert.equal(cfg.notifyChildSessions, true)
+	})
+	cfgCleanup()
 
 	console.log("categorizeErrorEvent:")
 	await test("categorize bare AbortError -> user-cancel", () => {
