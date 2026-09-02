@@ -86,6 +86,32 @@ foreach ($stale in @("kdco-notify-win.js", "plugin-logger.js", "jump-to-opencode
     }
 }
 
+# Old deploys shipped a bundled default config at <dest>\config\kdco-notify-win.jsonc
+# (P6). New design ships NO config file in the package — P6 is an empty slot and
+# the annotated template lives at <dest>\kdco-notify-win.sample.jsonc (inert).
+# Remove a stale auto-deployed bundled default (identified by its
+# "BUNDLED DEFAULT" header) so it can't be picked up as a P6 layer; a
+# user-placed config in config/ (custom header) is left untouched.
+$pkgConfigDir = Join-Path $dest "config"
+if (Test-Path -LiteralPath $pkgConfigDir) {
+    foreach ($legacy in @("kdco-notify-win.jsonc", "kdco-notify-win.json", "kdco-notify.jsonc", "kdco-notify.json")) {
+        $legacyPath = Join-Path $pkgConfigDir $legacy
+        if (Test-Path -LiteralPath $legacyPath) {
+            $head = ""
+            try { $head = Get-Content -LiteralPath $legacyPath -TotalCount 3 -ErrorAction Stop | Out-String } catch {}
+            if ($head -match "BUNDLED DEFAULT") {
+                Remove-Item -LiteralPath $legacyPath -Force
+                Write-Host "  removed stale bundled config: $legacyPath"
+            }
+        }
+    }
+    # Drop the package config dir if nothing remains (P6 empty slot).
+    if (-not (Get-ChildItem -LiteralPath $pkgConfigDir -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $pkgConfigDir -Force
+        Write-Host "  removed empty package config dir: $pkgConfigDir"
+    }
+}
+
 $entryUrl = ($dest -replace "\\", "/").Replace(" ", "%20")
 Write-Host ""
 Write-Host "Done. Register in opencode.json(c) to enable (remove the entry to disable):"
