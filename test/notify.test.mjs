@@ -12,6 +12,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as net from "node:net"
+import { fileURLToPath } from "node:url"
 import {
 	createNotifyPlugin,
 	classifyError,
@@ -128,6 +129,8 @@ const baseConfig = () => ({
 	heartbeat: { enabled: false, intervalSec: 30, stallSec: 120, warnWhileStalled: false },
 })
 
+const PLUGIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "kdco-notify-win")
+
 async function main() {
 	console.log("classifyError:")
 	await test("classify http-error (503)", () => {
@@ -207,38 +210,30 @@ async function main() {
 	}
 	function cfgRm(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch {} }
 
-	await test("bundled default (P6) is always present; no other layers when nothing else exists", () => {
+	await test("no files -> chain empty, loadConfig returns DEFAULT_CONFIG (logging.enabled === false)", () => {
 		cfgRm(path.join(cfgProj, ".opencode"))
 		cfgRm(path.join(cfgHome, ".config"))
 		const layers = resolveConfigLayers()
-		assert.ok(layers.length >= 1, "bundled P6 layer should always be present")
-		assert.equal(layers[0].kind, "bundled")
+		assert.equal(layers.length, 0, "no file layers when nothing exists")
 	})
-	await test("global file alone -> bundled + global layers, loadConfig merges them", async () => {
+	await test("loadConfig with no files returns DEFAULT_CONFIG", async () => {
+		cfgRm(path.join(cfgProj, ".opencode"))
 		cfgRm(path.join(cfgHome, ".config"))
-		const globalDir = path.join(cfgHome, ".config", "opencode")
-		fs.mkdirSync(globalDir, { recursive: true })
-		fs.writeFileSync(path.join(globalDir, "kdco-notify-win.jsonc"), '{ "showTimestamp": false, "sounds": { "idle": "Notification.IM" } }')
-		const layers = resolveConfigLayers()
-		assert.ok(layers.some((l) => l.kind === "global"), "expected a global layer")
 		const cfg = await loadConfig()
-		assert.equal(cfg.showTimestamp, false)
-		assert.equal(cfg.sounds.idle, "Notification.IM")
-		assert.equal(cfg.notifyChildSessions, false) // default survives
+		assert.equal(cfg.logging.enabled, false, "DEFAULT_CONFIG.logging.enabled is false")
+		assert.equal(cfg.notifyChildSessions, false, "default survives")
 	})
-	await test("project file overrides global per-key (not wholesale)", async () => {
-		const globalDir = path.join(cfgHome, ".config", "opencode")
-		fs.writeFileSync(path.join(globalDir, "kdco-notify-win.jsonc"), '{ "showTimestamp": false, "showSummary": true, "sounds": { "idle": "Notification.IM" } }')
+	await test("project file overrides defaults per-key (not wholesale)", async () => {
 		const projDir = path.join(cfgProj, ".opencode", "plugins", "config")
 		fs.mkdirSync(projDir, { recursive: true })
 		fs.writeFileSync(path.join(projDir, "kdco-notify-win.jsonc"), '{ "sounds": { "idle": "Notification.Mail" } }')
 		const layers = resolveConfigLayers()
-		assert.deepEqual(layers.map((l) => l.kind), ["bundled", "global", "project"])
+		assert.deepEqual(layers.map((l) => l.kind), ["project"])
 		const cfg = await loadConfig()
-		// project only overrode sounds.idle; showTimestamp stays false (global), showSummary stays true (global)
+		// project only overrode sounds.idle; other keys stay at DEFAULT_CONFIG values
 		assert.equal(cfg.sounds.idle, "Notification.Mail")
-		assert.equal(cfg.showTimestamp, false)
-		assert.equal(cfg.showSummary, true)
+		assert.equal(cfg.showTimestamp, true) // default
+		assert.equal(cfg.showSummary, true) // default
 	})
 	await test("official options (P1/P3) are the highest-priority layer", async () => {
 		const projDir = path.join(cfgProj, ".opencode", "plugins", "config")
@@ -251,13 +246,30 @@ async function main() {
 		const p = resolveConfigPath()
 		assert.ok(p && p.includes("project"), `expected project path, got ${p}`)
 	})
-	await test("legacy kdco-notify.jsonc is honored (global)", async () => {
-		const globalDir = path.join(cfgHome, ".config", "opencode")
-		cfgRm(path.join(globalDir, "kdco-notify-win.jsonc"))
+	await test("legacy kdco-notify.jsonc is honored in project directory", async () => {
+		const projDir = path.join(cfgProj, ".opencode", "plugins", "config")
 		cfgRm(path.join(cfgProj, ".opencode"))
-		fs.writeFileSync(path.join(globalDir, "kdco-notify.jsonc"), '{ "notifyChildSessions": true }')
+		fs.mkdirSync(projDir, { recursive: true })
+		fs.writeFileSync(path.join(projDir, "kdco-notify.jsonc"), '{ "notifyChildSessions": true }')
 		const cfg = await loadConfig()
 		assert.equal(cfg.notifyChildSessions, true)
+	})
+	await test("resolveConfigPath returns null when no files exist", () => {
+		cfgRm(path.join(cfgProj, ".opencode"))
+		cfgRm(path.join(cfgHome, ".config"))
+		const p = resolveConfigPath()
+		assert.equal(p, null)
+	})
+	await test("sample template exists but is never loaded", () => {
+		const samplePath = path.join(PLUGIN_DIR, "kdco-notify-win.sample.jsonc")
+		assert.ok(fs.existsSync(samplePath), "sample template should exist")
+		// resolveConfigLayers must not return any layer whose path equals the sample
+		cfgRm(path.join(cfgProj, ".opencode"))
+		cfgRm(path.join(cfgHome, ".config"))
+		const layers = resolveConfigLayers()
+		for (const layer of layers) {
+			assert.notEqual(path.resolve(layer.path), path.resolve(samplePath), "sample template must never appear in layers")
+		}
 	})
 	cfgCleanup()
 

@@ -24,13 +24,12 @@
  * Config file (JSONC with comments, see README / DEFAULT_CONFIG below). Resolved
  * along a priority chain (low → high, deep-merged key by key):
  *   P7  code DEFAULT_CONFIG
- *   P6  bundled default <plugin-dir>/config/kdco-notify-win.jsonc
- *   P5  global ~/.config/opencode/kdco-notify-win.jsonc
+ *   P6  <plugin-dir>/config/kdco-notify-win.jsonc (empty slot: no bundled file)
  *   P2  project .opencode/plugins/config/kdco-notify-win.jsonc
  *   P1+P3  opencode.json(c) `plugin` tuple options (server's 2nd arg, highest)
  * Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same dirs are also
- * honored. An annotated template with every option documented ships inside the
- * plugin dir as `config/kdco-notify-win.jsonc`.
+ * honored. An annotated sample template (inert, never loaded) ships as
+ * `kdco-notify-win.sample.jsonc` — copy to `kdco-notify-win.jsonc` to activate.
  */
 
 import * as fs from "node:fs/promises"
@@ -649,7 +648,7 @@ const DEFAULT_CONFIG = {
 	 */
 	logging: {
 		/** Master switch. false == "NO" (no file writes at all, ERROR still prints to console). */
-		enabled: true,
+		enabled: false,
 		/** Min severity that is written to the file: ALL/TRACE/DEBUG/INFO/WARN/ERROR/NO. */
 		minLogLevel: "WARN",
 		/** Per-module overrides ({moduleName: level}) — "INHERIT" means the global. */
@@ -702,20 +701,17 @@ const DEFAULT_CONFIG = {
 // replaced wholesale). Official opencode.json(c) tuple options (P1/P3) are the
 // highest-priority layer and are merged last at runtime.
 //   P7  code DEFAULT_CONFIG                       (base)
-//   P6  <plugin-dir>/config/kdco-notify-win.jsonc (bundled, ships with plugin)
-//   P5  ~/.config/opencode/kdco-notify-win.jsonc  (global file)
+//   P6  <plugin-dir>/config/kdco-notify-win.jsonc (empty slot: no bundled file)
 //   P2  .opencode/plugins/config/kdco-notify-win.jsonc (project file)
 //   P1+P3  opencode.json(c) `plugin` tuple options (server's 2nd arg, highest)
 // ---------------------------------------------------------------------------
 const PLUGIN_ID = "kdco-notify-win"
 const BUNDLED_CONFIG_DIR = () => path.join(PLUGIN_DIR, "config")
 const PROJECT_CONFIG_DIR = () => path.join(process.cwd(), ".opencode", "plugins", "config")
-const GLOBAL_CONFIG_DIR = () => path.join(os.homedir(), ".config", "opencode")
 
 // Per-directory candidate filenames, newest convention first (legacy names last).
 const CONFIG_FILENAMES = ["kdco-notify-win.jsonc", "kdco-notify-win.json", "kdco-notify.jsonc", "kdco-notify.json"]
 const bundledCandidates = () => CONFIG_FILENAMES.map((f) => path.join(BUNDLED_CONFIG_DIR(), f))
-const globalCandidates = () => CONFIG_FILENAMES.map((f) => path.join(GLOBAL_CONFIG_DIR(), f))
 const projectCandidates = () => CONFIG_FILENAMES.map((f) => path.join(PROJECT_CONFIG_DIR(), f))
 
 /** First existing file from a candidate list, else null. @returns {string|null} */
@@ -726,15 +722,13 @@ function firstExisting(candidates) {
 
 /**
  * Resolve every config file layer that exists, in low→high priority order.
- * Each layer is `{ path, kind }` where kind is "bundled" | "global" | "project".
+ * Each layer is `{ path, kind }` where kind is "bundled" | "project".
  * @returns {{path:string, kind:string}[]}
  */
 export function resolveConfigLayers() {
 	const layers = []
 	const bundled = firstExisting(bundledCandidates())
 	if (bundled) layers.push({ path: bundled, kind: "bundled" })
-	const global = firstExisting(globalCandidates())
-	if (global) layers.push({ path: global, kind: "global" })
 	const project = firstExisting(projectCandidates())
 	if (project) layers.push({ path: project, kind: "project" })
 	return layers

@@ -29,8 +29,7 @@ Resulting layout (the whole package lives in a `kdco-notify-win/` subdirectory):
 ├── package.json        # deps: node-notifier + detect-terminal
 ├── node_modules/       # vendored (offline-ready)
 ├── assets/             # icon + banner
-└── config/
-    └── kdco-notify-win.jsonc   # bundled default (P6)
+└── kdco-notify-win.sample.jsonc   # inert annotated template (copy to activate)
 ```
 
 Then **register** it in your OpenCode config (`~/.config/opencode/opencode.json(c)` global, or `<project>/opencode.json(c)` project):
@@ -118,12 +117,11 @@ Works out of the box. Config is **JSONC** (comments + trailing commas allowed) a
 | Priority | Source | Scope |
 |---|---|---|
 | P1+P3 | `opencode.json(c)` `plugin` tuple options (server's 2nd arg) | **Official channel, highest** — global + project |
-| P2 | `<project>/.opencode/plugins/config/kdco-notify-win.jsonc` | Project-level file |
-| P5 | `~/.config/opencode/kdco-notify-win.jsonc` | Global file (all projects) |
-| P6 | `<plugin-dir>/config/kdco-notify-win.jsonc` | Bundled default (ships with plugin) |
+| P2 | `<project>/.opencode/plugins/config/kdco-notify-win.jsonc` | Project-level file (only file-based layer) |
+| P6 | `<plugin-dir>/config/kdco-notify-win.jsonc` | Empty slot — no bundled file shipped; copy sample template here to activate |
 | P7 | code `DEFAULT_CONFIG` | Base defaults |
 
-Higher layers override lower ones **per key** (they do not replace the whole object). Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the same directories are also honored (after the `-win` names).
+Higher layers override lower ones **per key** (they do not replace the whole object). Legacy `kdco-notify.jsonc` / `kdco-notify.json` under the project directory and plugin directory are also honored (after the `-win` names).
 
 Example — official tuple options (P1/P3, highest priority):
 
@@ -140,19 +138,14 @@ Example — official tuple options (P1/P3, highest priority):
 }
 ```
 
-Example — a global file (P5) that a project file (P2) can partially override:
+Example — a project file (P2) that partially overrides defaults:
 
 ```jsonc
-// ~/.config/opencode/kdco-notify-win.jsonc
-{ "showTimestamp": false, "sounds": { "idle": "Notification.IM" } }
+// <project>/.opencode/plugins/config/kdco-notify-win.jsonc  (project file, only file-based layer)
+{ "sounds": { "idle": "Notification.Mail" } }   // only idle changes; other keys stay at DEFAULT_CONFIG values
 ```
 
-```jsonc
-// <project>/.opencode/plugins/config/kdco-notify-win.jsonc  (project overrides P5)
-{ "sounds": { "idle": "Notification.Mail" } }   // only idle changes; error/network stay as P5
-```
-
-An annotated template with **every option documented inline** ships as `<plugin-dir>/config/kdco-notify-win.jsonc` (bundled P6 default). For a project target, `scripts/deploy.ps1` also writes an annotated example to `.opencode/plugins/config/kdco-notify-win.jsonc` (P2) — only if missing, so your edits survive redeploys. `logging` hot-reloads on file change; the rest applies on OpenCode restart.
+An annotated sample template (inert, never loaded by the plugin) ships as `kdco-notify-win.sample.jsonc` in the plugin directory. Copy it to `kdco-notify-win.jsonc` in your project `.opencode/plugins/config/` or plugin `config/` directory to activate. For a project target, `scripts/deploy.ps1` also writes a template-derived config to `.opencode/plugins/config/kdco-notify-win.jsonc` (P2) — only if missing, so your edits survive redeploys. `logging` hot-reloads on file change; the rest applies on OpenCode restart.
 
 ```jsonc
 {
@@ -177,8 +170,8 @@ An annotated template with **every option documented inline** ships as `<plugin-
   "clickProgram": "",
   "clickArgs": [],
   "logging": {
-    "enabled": true,
-    "minLogLevel": "ALL"
+    "enabled": false,
+    "minLogLevel": "WARN"
   },
   "notifyCancelled": true,
   "heartbeat": {

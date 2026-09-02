@@ -1,24 +1,24 @@
 // ============================================================================
-// kdco-notify-win — BUNDLED DEFAULT config (P6)
+// kdco-notify-win — SAMPLE template (INERT — never loaded by the plugin)
 // ============================================================================
 //
-// This file ships inside the plugin dir (config/kdco-notify-win.jsonc) and is
-// the LOWEST file layer of the config chain (P6). Every value here matches the
-// built-in DEFAULT_CONFIG (P7), so copying it to a user-editable location is a
-// no-op — it exists so you can see every option and copy it up the chain.
+// ⚠  This file name contains ".sample" and is NOT in the plugin's
+//    CONFIG_FILENAMES list, so it will NEVER be loaded automatically.
+//
+// To activate: copy this file as `kdco-notify-win.jsonc` to one of:
+//   • <project>/.opencode/plugins/config/kdco-notify-win.jsonc  (project, P2)
+//   • <plugin-dir>/config/kdco-notify-win.jsonc                 (slot, P6)
+// Then edit as needed.
 //
 // Config priority chain (low -> high, deep-merged key by key):
-//   P7  code DEFAULT_CONFIG                       <- base
-//   P6  <plugin-dir>/config/kdco-notify-win.jsonc <- this file
-//   P5  ~/.config/opencode/kdco-notify-win.jsonc  <- global (all projects)
-//   P2  .opencode/plugins/config/kdco-notify-win.jsonc <- project
-//   P1+P3  opencode.json(c) `plugin` tuple options  <- highest (official)
+//   P7  code DEFAULT_CONFIG                       (base)
+//   P6  <plugin-dir>/config/kdco-notify-win.jsonc (empty slot; copy this file here)
+//   P2  .opencode/plugins/config/kdco-notify-win.jsonc (project file)
+//   P1+P3  opencode.json(c) `plugin` tuple options  (highest, official)
 //
 // Objects (sounds/quietHours/heartbeat/logging) are merged per-key; arrays
 // are replaced wholesale. `logging` hot-reloads on file change; the rest
 // applies on OpenCode restart.
-//
-// To customize: copy this file to your global or project location and edit.
 // ============================================================================
 
 {
@@ -70,7 +70,9 @@
 	"clickProgram": "",
 	"clickArgs": [],
 
-	// Diagnostic file logging. Bundled default is OFF (no disk writes).
+	// Diagnostic file logging. Default is OFF (no disk writes).
+	// For on-site diagnosis, set enabled to true and minLogLevel to "ALL":
+	//   "logging": { "enabled": true, "minLogLevel": "ALL" }
 	"logging": {
 		"enabled": false,
 		"minLogLevel": "WARN",

@@ -335,3 +335,49 @@ P7     代码 DEFAULT_CONFIG
 - [ ] 重新部署全局 + 项目两处，验证 `opencode.jsonc` 注册后 Status 面板正确显示插件名（依赖 OpenCode 上游 W1 修复，Windows file:// basename bug）。
 - [ ] 提交本轮改动（分支 `dev`）。
 - 说明：`%USERPROFILE%` 全局目录自始至终未在本轮被脚本写入（deploy 未执行，仅改仓库内文件）。
+
+## 15. 配置链收敛轮（2026-09-02）：P5 移除 + P6 空槽化 + 惰性模板 + logging 默认翻 false
+
+> 用户决策：配置链从 P1–P7 收敛为 P7/P6(空槽)/P2/P1+P3 四层。P5（全局 ~/.config/opencode/）从设计上删除；P6 不再携带 bundled 配置文件（空槽）；新增惰性模板 `kdco-notify-win.sample.jsonc`（命名含 `.sample`，插件永不加载）。`DEFAULT_CONFIG.logging.enabled` 翻 `false`（删掉 bundled 文件后不能靠文件压默认值）。
+
+### 15.1 改动清单
+
+- [x] `dist/kdco-notify-win/index.js`：
+  - `DEFAULT_CONFIG.logging.enabled` 从 `true` 翻成 `false`。
+  - 头部注释链表去掉 P5 行；P6 行改为空槽说明；模板指向 `kdco-notify-win.sample.jsonc`。
+  - `resolveConfigLayers()` 注释块同步更新。
+  - 删除 `GLOBAL_CONFIG_DIR` 常量与 `globalCandidates()` 函数。
+  - `resolveConfigLayers()` 删除 global 块（`const global = ...` + `if (global) layers.push(...)`）。
+  - `CONFIG_FILENAMES` 保持 4 个名字不变（绝不要加 `.sample.jsonc`）。
+- [x] 新增 `dist/kdco-notify-win/kdco-notify-win.sample.jsonc`：惰性模板，命名含 `.sample`，永不在 `CONFIG_FILENAMES` 里，插件不会加载。内容基于原 bundled config 重写头部注释，logging 默认 `enabled:false` + `minLogLevel:WARN`，附诊断说明。
+- [x] 删除 `dist/kdco-notify-win/config/kdco-notify-win.jsonc`（bundled 配置文件）及空 `config/` 目录。
+- [x] 删除 `.opencode/plugins/config/kdco-notify-win.jsonc`（仓库里的活配置例）。
+- [x] `scripts/deploy.ps1`：
+  - 删除 config/ 目录创建与 bundled 拷贝（53–56 行）。
+  - 注释更新：包 = index.js + plugin-logger.js + package.json + node_modules + assets + kdco-notify-win.sample.jsonc。
+  - `$configSrc` 改为指向 `$src\kdco-notify-win.sample.jsonc`。
+  - Write-Host 文案更新为 "template-derived config (defaults, logging off)"。
+  - 输出行 "bundled:" 改为 "sample: ... (inert template; copy to kdco-notify-win.jsonc to activate)"。
+- [x] `test/notify.test.mjs`：
+  - 新增 `import { fileURLToPath }` + `PLUGIN_DIR` 常量。
+  - "bundled default (P6) is always present" 改为 "no files → chain empty, loadConfig returns DEFAULT_CONFIG (logging.enabled === false)"。
+  - 删除 "global file alone ..." 测试。
+  - "project file overrides global" 改为 "project file overrides defaults per-key"，断言 `layers` 为 `["project"]`。
+  - "legacy kdco-notify.jsonc" 从 global 目录改为项目目录验证。
+  - 新增 "resolveConfigPath returns null when no files exist"。
+  - 新增 "sample template exists but is never loaded" 守卫测试。
+- [x] `README.md`：
+  - Install 布局树删 `config/`，加 `kdco-notify-win.sample.jsonc`。
+  - Configuration 表删 P5 行；P6 改为空槽说明。
+  - legacy 句去掉全局目录说法。
+  - 示例删 P5 全局文件示例；P2 保留并注明唯一文件配置层。
+  - 模板句改为惰性模板说明。
+  - logging 段改中性默认（enabled:false / WARN）。
+- [x] `PLAN.md` 追加 §15 本节。
+
+### 15.2 验证
+
+- [x] `node test/notify.test.mjs` 全绿。
+- [x] `node test/logger.test.mjs` 全绿。
+- [x] PowerShell deploy.ps1 语法检查无报错。
+- [x] grep 确认无 P5/global config/bundled 残留引用（deploy.ps1、test/notify.test.mjs、README.md、index.js 中均无）。

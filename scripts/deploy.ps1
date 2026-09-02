@@ -1,4 +1,4 @@
-# Deploy kdco-notify-win to an OpenCode config directory.
+﻿# Deploy kdco-notify-win to an OpenCode config directory.
 #
 # OpenCode loads plugins in ONE of two ways:
 #   1. AUTO-DISCOVERY of direct .js/.ts files in the plugins dir — NOT used here.
@@ -40,36 +40,30 @@ Write-Host "Deploying to: $dest"
 if (-not (Test-Path $src)) { throw "Source package not found: $src" }
 
 # Whole package folder: index.js, plugin-logger.js, package.json, node_modules,
-# assets, config/ (bundled P6 default). Replacing the folder wholesale would
-# clobber the bundled config; copy contents so a redeploy refreshes code but
-# keeps any user tweak in config/ (config is the plugin's own dir, not a
-# user-edited project/global config location).
+# assets, and kdco-notify-win.sample.jsonc (inert template, never loaded).
+# Copy contents so a redeploy refreshes code.
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Force (Join-Path $src "index.js") $dest
 Copy-Item -Force (Join-Path $src "plugin-logger.js") $dest
 Copy-Item -Force (Join-Path $src "package.json") $dest
 Copy-Item -Recurse -Force (Join-Path $src "node_modules") (Join-Path $dest "node_modules")
 Copy-Item -Recurse -Force (Join-Path $src "assets") (Join-Path $dest "assets")
-New-Item -ItemType Directory -Force -Path (Join-Path $dest "config") | Out-Null
-$bundledCfg = Join-Path $src "config\kdco-notify-win.jsonc"
-$bundledDest = Join-Path $dest "config\kdco-notify-win.jsonc"
-if (Test-Path $bundledCfg) { Copy-Item -Force $bundledCfg $bundledDest }
+Copy-Item -Force (Join-Path $src "kdco-notify-win.sample.jsonc") $dest
 
-# Project-level config (P2): the annotated example ships to the PROJECT's own
-# `.opencode\plugins\config\kdco-notify-win.jsonc`, higher priority than the
-# global file (P5). Only written when absent so redeploys never clobber the
-# user's edits. (Global target keeps its global config.) Any stale
-# `kdco-notify.jsonc`/`kdco-notify.json` is removed so it can't shadow the new
-# file with old settings.
+# Project-level config (P2): write a template-derived config to the PROJECT's own
+# `.opencode\plugins\config\kdco-notify-win.jsonc`, the only file-based config
+# layer. Only written when absent so redeploys never clobber the user's edits.
+# Any stale `kdco-notify.jsonc`/`kdco-notify.json` is removed so it can't shadow
+# the new file with old settings.
 if ($Target -ne "global") {
     $projectRoot = Resolve-Path $Target
     $configDir = Join-Path $projectRoot ".opencode\plugins\config"
     $configDest = Join-Path $configDir "kdco-notify-win.jsonc"
-    $configSrc = Join-Path $repoRoot ".opencode\plugins\config\kdco-notify-win.jsonc"
+    $configSrc = Join-Path $src "kdco-notify-win.sample.jsonc"
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     if (-not (Test-Path $configDest)) {
         Copy-Item -Force $configSrc $configDest
-        Write-Host "  config:    $configDest (annotated example, logging = ALL)"
+        Write-Host "  config:    $configDest (template-derived config (defaults, logging off))"
     } else {
         Write-Host "  config:    $configDest (exists, left untouched)"
     }
@@ -101,4 +95,4 @@ Write-Host '  ]'
 Write-Host ""
 Write-Host "  package:   $dest"
 Write-Host "  entry:     $dest\index.js"
-Write-Host "  bundled:   $dest\config\kdco-notify-win.jsonc (P6 default)"
+Write-Host "  sample:    $dest\kdco-notify-win.sample.jsonc (inert template; copy to kdco-notify-win.jsonc to activate)"
