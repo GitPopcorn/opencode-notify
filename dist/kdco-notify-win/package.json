@@ -4,6 +4,11 @@
   "description": "Windows-only native notifications for OpenCode (fork of @kdco/notify, zero OCX, manual vendored)",
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./server": "./index.js",
+    "./package.json": "./package.json"
+  },
   "private": true,
   "dependencies": {
     "node-notifier": "^10.0.1",
@@ -11,5 +16,8 @@
   },
   "overrides": {
     "uuid": "^11.1.1"
+  },
+  "engines": {
+    "opencode": ">=1.18"
   }
 }
