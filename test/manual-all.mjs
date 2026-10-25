@@ -61,7 +61,7 @@ const expect = (name, fn) =>
 		.then(fn)
 		.then(() => { passed += 1; console.log(`  ok   - ${name}`) })
 		.catch((e) => { failed += 1; console.error(`  FAIL - ${name}: ${e?.message}`) })
-
+		
 const bodyOk = (opts) => {
 	assert.match(opts.message, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]/, "body starts with timestamp")
 }
@@ -80,11 +80,11 @@ async function main() {
 			sentBy.push(opts)
 		},
 	})({ client: makeClient() })
-
+	
 	const fire = (payload) => plugin.event({ event: payload })
-
+	
 	console.log("=== 5-way manual toast test (watch your screen) ===\n")
-
+	
 	// 1. READY
 	await expect("ready -> READY FOR REVIEW / green / Glass", async () => {
 		await fire({ type: "session.idle", properties: { sessionID: "s-ready" } })
@@ -97,7 +97,7 @@ async function main() {
 		assert.ok(o.message.includes("Steps:"), "ready body includes step summary")
 	})
 	await sleep(2200)
-
+	
 	// 2. ERROR (generic)
 	await expect("error -> SOMETHING WENT WRONG / orange / Basso", async () => {
 		await fire({ type: "session.error", properties: { sessionID: "s-err", error: "boom" } })
@@ -108,7 +108,7 @@ async function main() {
 		bodyOk(o)
 	})
 	await sleep(2200)
-
+	
 	// 3. NETWORK
 	await expect("network -> NETWORK INTERRUPTED / red / Basso + beep", async () => {
 		await fire({ type: "session.error", properties: { sessionID: "s-net", error: "fetch failed: getaddrinfo ECONNRESET" } })
@@ -119,7 +119,7 @@ async function main() {
 		bodyOk(o)
 	})
 	await sleep(2200)
-
+	
 	// 4. PERMISSION
 	await expect("permission -> WAITING FOR CONFIRMATION / yellow / Submarine", async () => {
 		await fire({ type: "permission.updated", properties: { id: "perm-1" } })
@@ -130,7 +130,7 @@ async function main() {
 		bodyOk(o)
 	})
 	await sleep(2200)
-
+	
 	// 5. QUESTION
 	await expect("question -> QUESTION FOR YOU / blue / Submarine", async () => {
 		await fire({ type: "question.asked", properties: { sessionID: "s-q", id: "q-1" } })
@@ -141,7 +141,7 @@ async function main() {
 		bodyOk(o)
 	})
 	await sleep(2200)
-
+	
 	console.log(`\n${passed} passed, ${failed} failed`)
 	console.log("Captured send opts (5 expected):")
 	for (const o of sentBy) console.log(`  - ${o.title}  [${o.theme}]  sound=${o.sound}`)

@@ -41,7 +41,7 @@ async function main() {
 	// ---- 1. backup existing config (if any) ----
 	const hadConfig = fs.existsSync(CONFIG_PATH)
 	if (hadConfig) fs.copyFileSync(CONFIG_PATH, BACKUP)
-
+	
 	const tempConfig = {
 		...baseConfig,
 		soundOverride: WAV,
@@ -51,7 +51,7 @@ async function main() {
 	fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
 	fs.writeFileSync(CONFIG_PATH, JSON.stringify(tempConfig, null, 2), "utf8")
 	console.log(`Temporary config written -> ${CONFIG_PATH}`)
-
+	
 	try {
 		const sentBy = []
 		// NOTE: readConfig is the REAL loader in this pass, so the plugin reads
@@ -64,9 +64,9 @@ async function main() {
 				sentBy.push(opts)
 			},
 		})({ client: { session: { get: async () => ({ data: { title: "extras demo", parentID: null } }) } } })
-
+		
 		await plugin.event({ event: { type: "session.idle", properties: { sessionID: "s-extras" } } })
-
+		
 		const o = sentBy[sentBy.length - 1]
 		assert.equal(o.sound, WAV, "soundOverride should win over sounds.idle")
 		assert.equal(o.clickProgram, "wt.exe", "clickProgram should pass through")

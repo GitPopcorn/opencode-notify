@@ -87,7 +87,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null, d
 	const readConfig = async () => config
 	let nowMs = clock ?? Date.now()
 	const clockFn = now ?? (() => nowMs)
-
+	
 	const pluginFactory = createNotifyPlugin({
 		platform,
 		detectTerminalImpl: () => "Windows Terminal",
@@ -99,7 +99,7 @@ async function makeHarness({ client, config, platform = "win32", clock = null, d
 		now: clockFn,
 		dedupeStorePath: dedupeStorePath ?? path.join(os.tmpdir(), `kdco-notify-test-${Math.random().toString(36).slice(2)}.json`),
 	})
-
+	
 	const pluginDone = await pluginFactory({ client })
 	return {
 		pluginDone,
@@ -151,7 +151,7 @@ async function main() {
 	await test("classify non-string -> generic", () => {
 		assert.equal(classifyError(undefined), "generic")
 	})
-
+	
 	console.log("parseJsonc:")
 	await test("parseJsonc strips line and block comments + BOM", () => {
 		const obj = parseJsonc('\uFEFF{\n// line comment\n"a": 1, /* block */ "b": 2\n}')
@@ -168,7 +168,7 @@ async function main() {
 	await test("parseJsonc fails loudly on broken JSON", () => {
 		assert.throws(() => parseJsonc("{ not json }"))
 	})
-
+	
 	console.log("deepMerge / config chain:")
 	await test("deepMerge scalars, nested objects, arrays, new keys", () => {
 		assert.deepEqual(deepMerge({ a: 1, b: 2 }, { b: 3 }), { a: 1, b: 3 })
@@ -188,7 +188,7 @@ async function main() {
 		assert.deepEqual(deepMerge({ a: 1 }, undefined), { a: 1 })
 		assert.deepEqual(deepMerge({ a: 1 }, null), { a: 1 })
 	})
-
+	
 	// Config chain isolation: fake cwd + fake home, then restore.
 	const cfgOrigCwd = process.cwd()
 	const cfgOrigHome = process.env.USERPROFILE || process.env.HOME || ""
@@ -209,7 +209,7 @@ async function main() {
 		try { fs.rmSync(cfgRoot, { recursive: true, force: true }) } catch {}
 	}
 	function cfgRm(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch {} }
-
+	
 	await test("no files -> chain empty, loadConfig returns DEFAULT_CONFIG (logging.enabled === false)", () => {
 		cfgRm(path.join(cfgProj, ".opencode"))
 		cfgRm(path.join(cfgHome, ".config"))
@@ -272,7 +272,7 @@ async function main() {
 		}
 	})
 	cfgCleanup()
-
+	
 	console.log("categorizeErrorEvent:")
 	await test("categorize bare AbortError -> user-cancel", () => {
 		assert.equal(categorizeErrorEvent({ name: "AbortError", message: "This operation was aborted" }), "user-cancel")
@@ -321,7 +321,7 @@ async function main() {
 		assert.equal(categorizeErrorEvent({ name: "Error", message: "division by zero" }), "generic")
 		assert.equal(categorizeErrorEvent(undefined), "generic")
 	})
-
+	
 	console.log("plugin behaviors:")
 	await test("session.idle notifies parent with title", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
@@ -330,20 +330,20 @@ async function main() {
 		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 		assertBody(h.sent[0].message, "My Task")
 	})
-
+	
 	await test("child session idle is suppressed by default", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "child" } } })
 		assert.equal(h.sent.length, 0)
 	})
-
+	
 	await test("notifyChildSessions:true includes child", async () => {
 		const cfg = { ...baseConfig(), notifyChildSessions: true }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "child" } } })
 		assert.equal(h.sent.length, 1)
 	})
-
+	
 	await test("session.error notifies with message", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -353,7 +353,7 @@ async function main() {
 		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
 		assertBody(h.sent[0].message, "boom")
 	})
-
+	
 	await test("network interruption uses distinct title + beep", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -363,7 +363,7 @@ async function main() {
 		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 		assert.equal(h.beeps.length, 1)
 	})
-
+	
 	await test("manual ESC (AbortError) -> STOPPED BY YOU cancelled toast", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -377,7 +377,7 @@ async function main() {
 		assert.equal(h.sent[0].theme, "cancelled")
 		assert.equal(h.beeps.length, 0)
 	})
-
+	
 	await test("user-abort message -> STOPPED BY YOU toast", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -387,7 +387,7 @@ async function main() {
 		assert.equal(h.sent[0].title, "STOPPED BY YOU")
 		assert.equal(h.sent[0].theme, "cancelled")
 	})
-
+	
 	await test("notifyCancelled:false suppresses STOPPED BY YOU toast", async () => {
 		const cfg = { ...baseConfig(), notifyCancelled: false }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
@@ -396,7 +396,7 @@ async function main() {
 		})
 		assert.equal(h.sent.length, 0)
 	})
-
+	
 	await test("ESC as nameless string -> STOPPED BY YOU, then idle does NOT re-announce READY", async () => {
 		// Reproduces the real-world regression: an ESC surfaces as session.error
 		// with a NAMELESS string, and OpenCode then ALSO emits session.idle. Only
@@ -411,7 +411,7 @@ async function main() {
 		assert.equal(h.sent[0].theme, "cancelled")
 		assert.equal(h.beeps.length, 0)
 	})
-
+	
 	await test("idle after error beyond the readyDedupe window is suppressed (15s fallback)", async () => {
 		// The 1.5s readyDedupe window can expire before a slow session.idle
 		// arrives. The 15s readySuppress window must still block READY.
@@ -426,7 +426,7 @@ async function main() {
 		assert.equal(h.sent.length, 1, "still exactly one toast")
 		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 	})
-
+	
 	await test("idle without any prior error still announces READY after the suppress window", async () => {
 		// Sanity: a normal completion whose idle arrives (well after startup)
 		// must NOT be blocked because some OTHER session errored.
@@ -435,7 +435,7 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 	})
-
+	
 	await test("generic session.error remains SOMETHING WENT WRONG", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -445,7 +445,7 @@ async function main() {
 		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
 		assert.equal(h.sent[0].theme, "error")
 	})
-
+	
 	await test("quiet hours suppress notification", async () => {
 		const cfg = { ...baseConfig(), quietHours: { enabled: true, start: "22:00", end: "08:00" } }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
@@ -466,20 +466,20 @@ async function main() {
 		}
 		assert.equal(h.sent.length, 0)
 	})
-
+	
 	await test("quiet hours off -> notifies", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
 	})
-
+	
 	await test("dedupe: same ready event within window sent once", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
 	})
-
+	
 	await test("cross-instance: two plugin instances sharing a store send only once", async () => {
 		// Simulates global + project plugins dirs both loading the plugin.
 		const sharedPath = path.join(os.tmpdir(), `kdco-notify-cross-${Math.random().toString(36).slice(2)}.json`)
@@ -490,14 +490,14 @@ async function main() {
 		assert.equal(a.sent.length + b.sent.length, 1)
 		fs.rmSync(sharedPath, { force: true })
 	})
-
+	
 	await test("permission.updated notifies", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "permission.updated", properties: { id: "p1" } } })
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "WAITING FOR CONFIRMATION")
 	})
-
+	
 	await test("question.asked notifies", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -506,14 +506,14 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "QUESTION FOR YOU")
 	})
-
+	
 	await test("plugin loads without vendored deps (graceful warn, no crash)", async () => {
 		// Default factory must not throw at construction even if node-notifier missing.
 		const factory = createNotifyPlugin({})
 		const instance = await factory({ client: makeSessionClient() })
 		assert.equal(typeof instance.event, "function")
 	})
-
+	
 	console.log("busy/status/dedupe behaviors:")
 	await test("session.status busy does NOT notify", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
@@ -522,7 +522,7 @@ async function main() {
 		})
 		assert.equal(h.sent.length, 0)
 	})
-
+	
 	await test("session.status idle DOES notify (deduped with session.idle)", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -534,7 +534,7 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assertBody(h.sent[0].message, "My Task")
 	})
-
+	
 	await test("session.error deduped within window", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		const ev = () =>
@@ -545,7 +545,7 @@ async function main() {
 		await ev()
 		assert.equal(h.sent.length, 1)
 	})
-
+	
 	await test("session.error object extracts readable message", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -556,13 +556,13 @@ async function main() {
 		})
 		assertBody(h.sent[0].message, "Model not found: X.")
 	})
-
+	
 	console.log("extended features:")
 	await test("formatTimestamp produces [yyyy-MM-dd HH:mm:ss]", async () => {
 		const d = new Date(2026, 7, 5, 9, 8, 7) // 2026-08-05 09:08:07 local
 		assert.equal(formatTimestamp(d), "[2026-08-05 09:08:07]")
 	})
-
+	
 	await test("ready message includes recent steps summary", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
@@ -570,33 +570,33 @@ async function main() {
 		assert.ok(h.sent[0].message.includes("Read file /a.txt"), "should include tool title")
 		assert.ok(h.sent[0].message.includes("Bash ls"), "should include second tool")
 	})
-
+	
 	await test("buildStepSummary returns latest steps joined by arrow", async () => {
 		const summary = await buildStepSummary(makeSessionClient(), "parent", 3)
 		// Reverse order: most recent first -> Read file /a.txt then Bash ls
 		assert.equal(summary, "Read file /a.txt → Bash ls")
 	})
-
+	
 	await test("buildStepSummary returns empty when client lacks messages", async () => {
 		const client = { session: {} }
 		const summary = await buildStepSummary(client, "parent", 3)
 		assert.equal(summary, "")
 	})
-
+	
 	await test("summarySteps:0 disables summary line", async () => {
 		const cfg = { ...baseConfig(), summarySteps: 0 }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.ok(!h.sent[0].message.includes("Steps:"), "should NOT include Steps line")
 	})
-
+	
 	await test("showTimestamp:false removes timestamp line", async () => {
 		const cfg = { ...baseConfig(), showTimestamp: false }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.ok(!/^\s*\[\d{4}-\d{2}-\d{2}/.test(h.sent[0].message), "message should not start with timestamp")
 	})
-
+	
 	await test("session.error suppressses a later ready for same session", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({
@@ -605,13 +605,13 @@ async function main() {
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1, "error should have suppressed the ready toast")
 	})
-
+	
 	await test("ready notification carries ready theme", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].theme, "ready")
 	})
-
+	
 	await test("network error carries network theme + sound override wins", async () => {
 		const cfg = { ...baseConfig(), soundOverride: "Notification.Mail" }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
@@ -621,7 +621,7 @@ async function main() {
 		assert.equal(h.sent[0].theme, "network")
 		assert.equal(h.sent[0].sound, "Notification.Mail")
 	})
-
+	
 	await test("clickProgram is passed through as clickProgram", async () => {
 		const cfg = { ...baseConfig(), clickMode: "program", clickProgram: "wt.exe", clickArgs: ["-d", ".", "opencode"] }
 		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
@@ -629,20 +629,20 @@ async function main() {
 		assert.equal(h.sent[0].clickProgram, "wt.exe")
 		assert.deepEqual(h.sent[0].clickArgs, ["-d", ".", "opencode"])
 	})
-
+	
 	await test("clickMode off (default) sends no click program", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].clickProgram === undefined, true)
 		assert.equal(h.sent[0].clickArgs === undefined, true)
 	})
-
+	
 	await test("default (no override) uses per-kind sound", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent[0].sound, "Glass")
 	})
-
+	
 	console.log("run-outcome classification (state-driven READY/error/cancel):")
 	await test("getLastRunOutcome -> error when final part carries state.error", async () => {
 		const client = {
@@ -655,7 +655,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "error")
 	})
-
+	
 	await test("getLastRunOutcome -> aborted on AbortError", async () => {
 		const client = {
 			session: {
@@ -667,7 +667,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
 	})
-
+	
 	await test("getLastRunOutcome -> aborted on status aborted", async () => {
 		const client = {
 			session: {
@@ -679,7 +679,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
 	})
-
+	
 	await test("getLastRunOutcome -> complete on clean final part", async () => {
 		const client = {
 			session: {
@@ -691,7 +691,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
 	})
-
+	
 	await test("getLastRunOutcome -> aborted when timeline ends on a user message (early-ESC, no assistant output)", async () => {
 		const client = {
 			session: {
@@ -703,7 +703,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
 	})
-
+	
 	await test("getLastRunOutcome -> complete still when final assistant part is clean (no regression)", async () => {
 		const client = {
 			session: {
@@ -716,7 +716,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
 	})
-
+	
 	await test("getLastRunOutcome -> aborted on empty assistant message with message-level MessageAbortedError", async () => {
 		// Real fast-ESC shape (L2DIAG 2026-08-06): the interrupted run's last
 		// assistant message has ZERO parts; the interrupt is only visible as the
@@ -732,7 +732,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
 	})
-
+	
 	await test("getLastRunOutcome -> error on message-level non-abort error", async () => {
 		const client = {
 			session: {
@@ -744,7 +744,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "error")
 	})
-
+	
 	await test("getLastRunOutcome -> aborted on part-level MessageAbortedError (prefix match)", async () => {
 		// "MessageAbortedError" = "aborted"+"error": the legacy ABORT_ERROR_NAMES
 		// "aborterror" entry misses it, so the prefix "abort" match must catch it
@@ -759,7 +759,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "aborted")
 	})
-
+	
 	await test("getLastRunOutcome -> complete on empty assistant message with no error (no brittle guess)", async () => {
 		const client = {
 			session: {
@@ -772,7 +772,7 @@ async function main() {
 		}
 		assert.equal(await getLastRunOutcome(client, "parent"), "complete")
 	})
-
+	
 	await test("idle after error is suppressed even beyond the 1.5s window (state-driven)", async () => {
 		const errorClient = {
 			session: {
@@ -790,7 +790,7 @@ async function main() {
 		assert.equal(h.sent.length, 1, "only the network toast, no READY")
 		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 	})
-
+	
 	await test("ESC/user-stop idle sends STOPPED BY YOU with cancelled theme", async () => {
 		const abortClient = {
 			session: {
@@ -806,7 +806,7 @@ async function main() {
 		assert.equal(h.sent[0].title, "STOPPED BY YOU")
 		assert.equal(h.sent[0].theme, "cancelled")
 	})
-
+	
 	await test("notifyCancelled:false falls back to READY", async () => {
 		const abortClient = {
 			session: {
@@ -822,7 +822,7 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "READY FOR REVIEW")
 	})
-
+	
 	await test("double-ESC: network error right after user-cancel is suppressed", async () => {
 		let clock = 1_000_000
 		const client = {
@@ -848,7 +848,7 @@ async function main() {
 		assert.equal(h.sent.length, 1, "network toast suppressed after user-cancel")
 		assert.equal(h.sent[0].title, "STOPPED BY YOU")
 	})
-
+	
 	await test("network error long after user-cancel is NOT suppressed", async () => {
 		let clock = 1_000_000
 		const client = {
@@ -868,14 +868,14 @@ async function main() {
 		assert.equal(h.sent.length, 2, "real network error fires after the window")
 		assert.equal(h.sent[1].title, "NETWORK INTERRUPTED")
 	})
-
+	
 	await test("network error WITHOUT a prior user-cancel still fires", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
 	})
-
+	
 	console.log("heartbeat watchdog:")
 	await test("heartbeat backfills SESSION ENDED for a silently-ended session", async () => {
 		let clock = 1_000_000
@@ -895,7 +895,7 @@ async function main() {
 		await h.pluginDone.heartbeatTick()
 		assert.equal(h.sent.length, 1, "no duplicate backfill")
 	})
-
+	
 	await test("heartbeat does NOT backfill when the session is still running", async () => {
 		let clock = 1_000_000
 		const statusClient = {
@@ -911,7 +911,7 @@ async function main() {
 		await h.pluginDone.heartbeatTick()
 		assert.equal(h.sent.length, 0)
 	})
-
+	
 	await test("heartbeat SESSION STALLED warn fires only when warnWhileStalled", async () => {
 		let clock = 1_000_000
 		const statusClient = {
@@ -928,7 +928,7 @@ async function main() {
 		assert.equal(h.sent.length, 1)
 		assert.equal(h.sent[0].title, "SESSION STALLED")
 	})
-
+	
 	await test("heartbeat does NOT backfill a run another instance already reported", async () => {
 		let clock = 1_000_000
 		const makeStatusClient = () => ({
@@ -951,7 +951,7 @@ async function main() {
 		assert.equal(b.sent.length, 0, "B must not backfill a run A already reported as READY")
 		fs.rmSync(sharedPath, { force: true })
 	})
-
+	
 	console.log("click-to-open (activation pipe + placeholders):")
 	await test("parseActivationPayload recognizes utf16/utf8 activation text", async () => {
 		assert.equal(parseActivationPayload("action=activate"), "activate")
@@ -960,13 +960,13 @@ async function main() {
 		assert.equal(parseActivationPayload(""), null)
 		assert.equal(parseActivationPayload("no tokens here"), null)
 	})
-
+	
 	await test("substitutePlaceholders replaces title/cwd/sessionID", async () => {
 		assert.equal(substitutePlaceholders("-t {{title}} -d {{cwd}} -s {{sessionID}}", { title: "My Task", cwd: "E:\\proj", sessionID: "abc" }),
 			"-t My Task -d E:\\proj -s abc")
 		assert.equal(substitutePlaceholders("{{title}}", {}), "")
 	})
-
+	
 	await test("sendWindowsToast activation callback spawns clickProgram", async () => {
 		const spawned = []
 		const childHandlers = {}
@@ -1016,7 +1016,7 @@ async function main() {
 		if (childHandlers.exit) childHandlers.exit(0)
 		await new Promise((r) => setTimeout(r, 20))
 	})
-
+	
 	console.log("self-hosted SnoreToast sender:")
 	await test("buildSnoreToastArgs includes -pipeName but does NOT forward click args", async () => {
 		const args = buildSnoreToastArgs(
@@ -1044,7 +1044,7 @@ async function main() {
 		assert.ok(!args.includes("wt.exe"), "click program must not reach SnoreToast")
 		assert.equal(args[args.indexOf("-pipeName") + 1], "\\\\.\\pipe\\notifierPipe-abc")
 	})
-
+	
 	await test("buildSnoreToastArgs native mode forwards -application but never -la", async () => {
 		const args = buildSnoreToastArgs(
 			{ title: "T", message: "M", clickMode: "native", clickProgram: "wt.exe" },
@@ -1058,7 +1058,7 @@ async function main() {
 		assert.ok(!args.includes("-la"), "must never forward -la")
 		assert.ok(args.includes("-pipeName"), "pipe still wired for reliable display")
 	})
-
+	
 	await test("sendWindowsToast native mode passes -application to SnoreToast", async () => {
 		let captured = null
 		const spawn = (cmd, args) => {
@@ -1073,7 +1073,7 @@ async function main() {
 		assert.ok(captured.includes("-application"), "should pass -application")
 		assert.equal(captured[captured.indexOf("-application") + 1], "wt.exe")
 	})
-
+	
 	await test("buildSnoreToastArgs normalizes bare sound to a working sound", async () => {
 		// "Glass" is a node-notifier-era preset name; SnoreToast fails with a
 		// bare name and shows NO toast. Non-"Notification." sounds are normalized
@@ -1084,23 +1084,23 @@ async function main() {
 		assert.ok(args.includes("Notification.Reminder"), "bare name -> Notification.Reminder")
 		assert.ok(!args.includes("Glass"), "raw 'Glass' must not reach SnoreToast")
 	})
-
+	
 	await test("buildSnoreToastArgs keeps Notification.* sound", async () => {
 		const args = buildSnoreToastArgs({ title: "T", message: "M", sound: "Notification.Mail" }, undefined, undefined, false)
 		assert.ok(args.includes("Notification.Mail"), "Notification.* should pass through")
 	})
-
+	
 	await test("buildSnoreToastArgs omits -s when no sound", async () => {
 		const args = buildSnoreToastArgs({ title: "T", message: "M" }, undefined, undefined, false)
 		assert.ok(!args.includes("-s"), "no -s without sound")
 	})
-
+	
 	await test("buildSnoreToastArgs omits -pipeName when no pipe", async () => {
 		const args = buildSnoreToastArgs({ title: "T", message: "M" }, undefined, undefined, false)
 		assert.ok(!args.includes("-pipeName"), "no -pipeName without a pipe")
 		assert.ok(!args.includes("-application"), "no -application without clickProgram")
 	})
-
+	
 	await test("sendWindowsToast spawns with unique pipe path per call", async () => {
 		const calls = []
 		const spawn = (cmd, args, opts) => {
@@ -1114,7 +1114,7 @@ async function main() {
 		assert.equal(calls.length, 2, "should have spawned twice")
 		assert.notEqual(calls[0], calls[1], "pipe paths should differ per toast")
 	})
-
+	
 	await test("sendWindowsToast no-ops off Windows", async () => {
 		const result = sendWindowsToast(
 			{ title: "T", message: "M" },
@@ -1122,7 +1122,7 @@ async function main() {
 		)
 		assert.equal(result, false)
 	})
-
+	
 	await test("sendWindowsToast picks legacy banner when iconTheme=legacy", async () => {
 		let captured = null
 		const spawn = (cmd, args) => {
@@ -1138,7 +1138,7 @@ async function main() {
 		assert.ok(i >= 0, "should pass a banner")
 		assert.ok(captured[i + 1].includes(path.join("legacy", "legacy-banner-ready.png")), "legacy banner path")
 	})
-
+	
 	await test("sendWindowsToast picks flat banner by default (no iconTheme)", async () => {
 		let captured = null
 		const spawn = (cmd, args) => {
@@ -1154,7 +1154,7 @@ async function main() {
 		assert.ok(i >= 0, "should pass a banner")
 		assert.ok(captured[i + 1].includes(path.join("assets", "opencode-notify-banner-ready.png")), "flat banner path")
 	})
-
+	
 	console.log(`\n${passed} passed, ${failed} failed`)
 	if (failed > 0) {
 		process.exitCode = 1
