@@ -381,3 +381,80 @@ P7     代码 DEFAULT_CONFIG
 - [x] `node test/logger.test.mjs` 全绿。
 - [x] PowerShell deploy.ps1 语法检查无报错。
 - [x] grep 确认无 P5/global config/bundled 残留引用（deploy.ps1、test/notify.test.mjs、README.md、index.js 中均无）。
+
+## 16. 通知内容增强轮（2026-11-03）：会话标题进标题栏 + 上下文/提问/回复/变更统计
+
+> 背景：多 Agent 并发时，固定类型标题（READY FOR REVIEW 等）无法区分通知来源，用户甚至另写 `notify_done.ps1` 兜底。
+> 目标：把「会话标题 + 会话上下文」提升到通知的最大字号区域，并显著增加正文信息量。
+
+### 16.1 设计
+
+- **标题栏**：`<短类型> · <会话标题>`，例如 `READY · Fix login flow`、`NETWORK · my-task`。短类型映射：ready/error/network/cancelled/permission/question/ended/stalled → READY/ERROR/NETWORK/STOPPED/CONFIRM/QUESTION/ENDED/STALLED。`showSessionTitle:false` 回退旧的完整标题，并把会话标题放回正文。
+- **正文行序**：
+  1. `[yyyy-MM-dd HH:mm:ss]  <项目目录名> · <Agent> · <model> · +adds/-dels · N files`（`showContext`）
+  2. 错误 / 权限 / 提问时：错误文本 / 权限标题 / 提问文本；其余类型省略或使用 fallback
+  3. `You: <最近真实用户提示词>`（`showPrompt`，跳过 synthetic/ignored 文本）
+  4. `AI: <最近 assistant 文本尾段>`（`showReply`）
+  5. `Steps: ...`（仅 ready/ended，沿用 `showSummary`/`summarySteps`）
+- **新增配置**：`showSessionTitle` / `sessionTitleChars` / `showContext` / `showPrompt` / `promptChars` / `showReply` / `replyChars` / `showBanner`。
+- **`showBanner:false`**：去掉 620x180 hero 图，让标题与正文在通知中占更大比例（应用图标不受影响）。
+- **性能**：idle / error / permission / question 路径把 `session.messages` 与 `session.get` 改为 `Promise.all` 并行，避免新增上下文带来的串行等待。
+
+### 16.2 改动清单
+
+- [x] `dist/kdco-notify-win/index.js`：新增 `normalizeSessionContext()`、`shortenText()`、`conversationContextFromMessages()`、`contextMetaBits()`、`buildToastTitle()`、`extractQuestionText()`；`composeMessage()` 改为同步、接收 `ctx/conv/primary`；所有 send 点改用 `buildToastTitle()`。
+- [x] 新增 `formatAgentName()`：OpenCode 存储的 `agent`/`mode` 是小写（`orchestrator`/`build`/`plan`），展示层统一转为 PascalCase；`conversationContextFromMessages()` 同时采集 `provider`（供后续解析模型显示名）。
+- [x] 新增 `resolveModelName()`：从 `client.config.providers()`（失败回落 `client.provider.list()`）读取 `models[modelID].name`，按 client 缓存 10 分钟；上下文行优先显示模型名称，取不到回退模型 ID。
+- [x] 新增可选 `content.titleTemplate` / `content.bodyTemplate` / `content.dropEmptyLines` 模板引擎；默认空模板保持内置布局，`renderNotification()` 统一产出 title/body。
+- [x] `permission.updated` / `permission.asked` / `question.asked` 现在携带 props，能拿到 `sessionID` 并展示会话上下文与权限/提问正文。
+- [x] 统一 question 去重键：`tool.execute.before` 的 `sessionID:callID` 改为与 `buildQuestionKey()` 相同的 `question:sessionID:callID`，避免两条路径/多实例各弹一条。
+- [x] `dist/kdco-notify-win/kdco-notify-win.sample.jsonc`：新增内容增强配置与注释。
+- [x] `README.md`：更新 How It Works 标题表，新增 "What the toast shows" 示例与配置说明。
+- [x] `test/notify.test.mjs`：更新标题断言；新增上下文行、You/AI 行、`showSessionTitle:false`、开关关闭、截断、权限/提问正文、`showBanner:false` 测试。
+- [x] `test/manual-all.mjs`：同步新标题与示例 client（user→assistant 顺序修正）。
+- [x] `PLAN.md`：本节。
+
+### 16.3 验证
+
+- [x] `node test/notify.test.mjs` — 123 passed, 0 failed。
+- [x] `node test/logger.test.mjs` — 12 passed, 0 failed。
+- [x] `node --check` 通过 `index.js` / `notify.test.mjs` / `manual-all.mjs`。
+
+### 16.4 内容模板占位符规范（已实现）
+
+> 用户确认的最终命名：agent/model 的原始 ID 用 `{agentId}` / `{modelId}`；`{model}` 与 `{modelName}` 同义，表示人类可读名称。
+
+| 占位符 | 含义 | 来源 / 回退 |
+|---|---|---|
+| `{type}` | 短类型 | `READY` / `ERROR` / `NETWORK` / `STOPPED` / `CONFIRM` / `QUESTION` / `ENDED` / `STALLED` |
+| `{typeFull}` | 完整旧标签 | `READY FOR REVIEW` 等 |
+| `{sessionTitle}` | 会话标题 | `session.title`，按 `sessionTitleChars` 截断 |
+| `{sessionId}` | 会话 ID | 事件 / `session.get` |
+| `{project}` | 项目目录名 | `basename(directory)` |
+| `{cwd}` | 完整工作目录 | `session.directory` |
+| `{agent}` | PascalCase agent | `orchestrator` → `Orchestrator` |
+| `{agentId}` | 原始 agent | `orchestrator` |
+| `{model}` | 模型显示名 | 同 `{modelName}` |
+| `{modelName}` | 模型显示名 | provider catalog `models[id].name`，取不到回退 `{modelId}` |
+| `{modelShort}` | 去标签短名 | 去掉开头 `[..]` 标签后的名称 |
+| `{modelId}` | 原始模型 ID | `deepseek/deepseek-v4.1-flash` |
+| `{provider}` | provider ID | `commandcode` |
+| `{meta}` | 预拼好的上下文 | `project · Agent · model · diff` |
+| `{timestamp}` | 本地时间 | `[yyyy-MM-dd HH:mm:ss]` |
+| `{diff}` | 变更摘要 | `+12/-3 · 2 files` |
+| `{additions}` / `{deletions}` / `{files}` | 单独数值 | `session.summary` |
+| `{prompt}` | 用户提示词 | 最近真实 user 文本，按 `promptChars` 截断 |
+| `{reply}` | assistant 回复 | 最近 assistant 文本尾段，按 `replyChars` 截断 |
+| `{steps}` | 工具步骤链 | 最近 N 个 tool part |
+| `{primary}` | 类型专属正文 | 错误 / 权限标题 / 提问 / fallback |
+| `{error}` / `{permissionTitle}` / `{question}` / `{fallback}` | 单独字段 | 对应事件数据 |
+
+渲染语义：变量为空替换为空串；`dropEmptyLines:true` 时整行占位符都为空则删除该行；`show*` 开关继续控制对应变量是否注入。
+
+实现落地：
+
+- `DEFAULT_CONFIG.content = { titleTemplate: "", bodyTemplate: [], dropEmptyLines: true }`；空模板继续走原有 `buildToastTitle()` / `composeMessage()`，保证默认行为零回归。
+- 非空模板走 `renderNotification()` → `buildTemplateVars()`：`titleTemplate` 只允许单行（空白折叠）；`bodyTemplate` 支持数组或含 `\n` 的字符串；未知占位符原样保留以便发现拼写错误。
+- `{status}` = `{primary}` 优先，否则 `{fallback}`；READY 不注入 fallback，避免和标题重复。
+- `showTimestamp/showPrompt/showReply/showSummary/showContext` 分别控制 `{timestamp}` / `{prompt}` / `{reply}` / `{steps}` / `{meta}`；`{agent}`、`{model}` 等细粒度变量不受 `showContext` 影响。
+- 新增测试：完整占位符映射、`dropEmptyLines` 开/关、字符串 body、未知占位符、`{status}/{error}/{fallback}`、`showContext:false` 与细粒度变量。

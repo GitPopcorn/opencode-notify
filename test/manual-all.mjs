@@ -8,11 +8,11 @@
  * Run:  node test/manual-all.mjs
  *
  * Expected order on screen:
- *   1. READY FOR REVIEW        (green banner)   session.idle
- *   2. SOMETHING WENT WRONG    (orange banner)  session.error (generic)
- *   3. NETWORK INTERRUPTED     (red banner, beep) session.error (ECONNRESET)
- *   4. WAITING FOR CONFIRMATION(yellow banner)  permission.updated
- *   5. QUESTION FOR YOU        (blue banner)    question.asked
+ *   1. READY · task <id>       (green banner)   session.idle
+ *   2. ERROR · task <id>       (orange banner)  session.error (generic)
+ *   3. NETWORK · task <id>     (red banner, beep) session.error (ECONNRESET)
+ *   4. CONFIRM · task <id>     (yellow banner)  permission.updated
+ *   5. QUESTION · task <id>    (blue banner)    question.asked
  */
 import assert from "node:assert"
 import { createNotifyPlugin } from "../dist/kdco-notify-win/index.js"
@@ -38,16 +38,27 @@ const config = {
 // session.get (title) and session.messages (step summary).
 const makeClient = () => ({
 	session: {
-		get: async ({ path: { id } }) => ({ data: { title: `task ${id}`, parentID: null } }),
+		get: async ({ path: { id } }) => ({
+			data: {
+				title: `task ${id}`,
+				parentID: null,
+				directory: "E:\\projects\\manual-demo",
+				summary: { additions: 8, deletions: 2, files: 1 },
+			},
+		}),
 		messages: async ({ path: { id } }) => [
 			{
-				info: { id: `${id}-m1`, role: "assistant" },
+				info: { id: `${id}-m1`, role: "user", agent: "build", model: { modelID: "demo-model" } },
+				parts: [{ type: "text", text: "demo prompt for the notification" }],
+			},
+			{
+				info: { id: `${id}-m2`, role: "assistant", mode: "build", modelID: "demo-model" },
 				parts: [
 					{ type: "tool", tool: "read", state: { title: "Read file /a.txt" } },
 					{ type: "tool", tool: "bash", state: { title: "Bash ls" } },
+					{ type: "text", text: "Demo reply: everything finished cleanly." },
 				],
 			},
-			{ info: { id: `${id}-m2`, role: "user" }, parts: [{ type: "text", text: "hi" }] },
 		],
 	},
 })
@@ -86,23 +97,23 @@ async function main() {
 	console.log("=== 5-way manual toast test (watch your screen) ===\n")
 	
 	// 1. READY
-	await expect("ready -> READY FOR REVIEW / green / Glass", async () => {
+	await expect("ready -> READY · task s-ready / green / Glass", async () => {
 		await fire({ type: "session.idle", properties: { sessionID: "s-ready" } })
 		const o = sentBy[sentBy.length - 1]
-		assert.equal(o.title, "READY FOR REVIEW")
+		assert.equal(o.title, "READY · task s-ready")
 		assert.equal(o.theme, "ready")
 		assert.equal(o.sound, "Glass")
 		bodyOk(o)
-		assert.ok(o.message.includes("task s-ready"), "body includes session title")
+		assert.ok(o.message.includes("You: demo prompt"), "body includes user prompt")
 		assert.ok(o.message.includes("Steps:"), "ready body includes step summary")
 	})
 	await sleep(2200)
 	
 	// 2. ERROR (generic)
-	await expect("error -> SOMETHING WENT WRONG / orange / Basso", async () => {
+	await expect("error -> ERROR · task s-err / orange / Basso", async () => {
 		await fire({ type: "session.error", properties: { sessionID: "s-err", error: "boom" } })
 		const o = sentBy[sentBy.length - 1]
-		assert.equal(o.title, "SOMETHING WENT WRONG")
+		assert.equal(o.title, "ERROR · task s-err")
 		assert.equal(o.theme, "error")
 		assert.equal(o.sound, "Basso")
 		bodyOk(o)
@@ -110,10 +121,10 @@ async function main() {
 	await sleep(2200)
 	
 	// 3. NETWORK
-	await expect("network -> NETWORK INTERRUPTED / red / Basso + beep", async () => {
+	await expect("network -> NETWORK · task s-net / red / Basso + beep", async () => {
 		await fire({ type: "session.error", properties: { sessionID: "s-net", error: "fetch failed: getaddrinfo ECONNRESET" } })
 		const o = sentBy[sentBy.length - 1]
-		assert.equal(o.title, "NETWORK INTERRUPTED")
+		assert.equal(o.title, "NETWORK · task s-net")
 		assert.equal(o.theme, "network")
 		assert.equal(o.sound, "Basso")
 		bodyOk(o)
@@ -124,7 +135,7 @@ async function main() {
 	await expect("permission -> WAITING FOR CONFIRMATION / yellow / Submarine", async () => {
 		await fire({ type: "permission.updated", properties: { id: "perm-1" } })
 		const o = sentBy[sentBy.length - 1]
-		assert.equal(o.title, "WAITING FOR CONFIRMATION")
+		assert.equal(o.title, "CONFIRM · task s-ready")
 		assert.equal(o.theme, "permission")
 		assert.equal(o.sound, "Submarine")
 		bodyOk(o)
@@ -132,10 +143,10 @@ async function main() {
 	await sleep(2200)
 	
 	// 5. QUESTION
-	await expect("question -> QUESTION FOR YOU / blue / Submarine", async () => {
+	await expect("question -> QUESTION · task s-q / blue / Submarine", async () => {
 		await fire({ type: "question.asked", properties: { sessionID: "s-q", id: "q-1" } })
 		const o = sentBy[sentBy.length - 1]
-		assert.equal(o.title, "QUESTION FOR YOU")
+		assert.equal(o.title, "QUESTION · task s-q")
 		assert.equal(o.theme, "question")
 		assert.equal(o.sound, "Submarine")
 		bodyOk(o)

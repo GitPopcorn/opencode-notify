@@ -19,6 +19,11 @@ import {
 	categorizeErrorEvent,
 	formatTimestamp,
 	buildStepSummary,
+	conversationContextFromMessages,
+	buildToastTitle,
+	shortenText,
+	formatAgentName,
+	resolveModelName,
 	getLastRunOutcome,
 	sendWindowsToast,
 	buildSnoreToastArgs,
@@ -57,22 +62,35 @@ function test(name, fn) {
 
 function makeSessionClient(parentID) {
 	const sessions = new Map()
-	sessions.set("parent", { data: { title: "My Task", parentID: null } })
-	sessions.set("child", { data: { title: "Sub Task", parentID: "parent" } })
+	sessions.set("parent", {
+		data: {
+			title: "My Task",
+			parentID: null,
+			directory: "E:\\projects\\my-project",
+			summary: { additions: 12, deletions: 3, files: 2 },
+		},
+	})
+	sessions.set("child", { data: { title: "Sub Task", parentID: "parent", directory: "E:\\projects\\my-project" } })
 	return {
 		session: {
 			get: async ({ path: { id } }) => sessions.get(id) ?? { data: null },
 			// A normally-completed run always ends on an assistant message.
 			messages: async ({ path: { id } }) => [
 				{
-					info: { id: `${id}-m2`, role: "user" },
+					info: {
+						id: `${id}-m2`,
+						role: "user",
+						agent: "build",
+						model: { providerID: "opencode", modelID: "deepseek-v4.1-flash" },
+					},
 					parts: [{ type: "text", text: "hi" }],
 				},
 				{
-					info: { id: `${id}-m1`, role: "assistant" },
+					info: { id: `${id}-m1`, role: "assistant", mode: "build", modelID: "deepseek-v4.1-flash" },
 					parts: [
 						{ type: "tool", tool: "read", state: { title: "Read file /a.txt" } },
 						{ type: "tool", tool: "bash", state: { title: "Bash ls" } },
+						{ type: "text", text: "Done: verified the change and ran the tests." },
 					],
 				},
 			],
@@ -120,6 +138,13 @@ const baseConfig = () => ({
 	showTimestamp: true,
 	showSummary: true,
 	summarySteps: 3,
+	showSessionTitle: true,
+	sessionTitleChars: 40,
+	showContext: true,
+	showPrompt: true,
+	promptChars: 80,
+	showReply: true,
+	replyChars: 100,
 	themedIcons: true,
 	soundOverride: "",
 	clickMode: "off",
@@ -327,8 +352,8 @@ async function main() {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "READY FOR REVIEW")
-		assertBody(h.sent[0].message, "My Task")
+		assert.equal(h.sent[0].title, "READY · My Task")
+		assertBody(h.sent[0].message, "You: hi")
 	})
 	
 	await test("child session idle is suppressed by default", async () => {
@@ -350,7 +375,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: "boom" } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
+		assert.equal(h.sent[0].title, "ERROR · My Task")
 		assertBody(h.sent[0].message, "boom")
 	})
 	
@@ -360,7 +385,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+		assert.equal(h.sent[0].title, "NETWORK · My Task")
 		assert.equal(h.beeps.length, 1)
 	})
 	
@@ -373,7 +398,7 @@ async function main() {
 			},
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		assert.equal(h.sent[0].theme, "cancelled")
 		assert.equal(h.beeps.length, 0)
 	})
@@ -384,7 +409,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: "The user aborted a request." } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		assert.equal(h.sent[0].theme, "cancelled")
 	})
 	
@@ -407,7 +432,7 @@ async function main() {
 		})
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1, "exactly one toast (no READY, no NETWORK)")
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		assert.equal(h.sent[0].theme, "cancelled")
 		assert.equal(h.beeps.length, 0)
 	})
@@ -424,7 +449,7 @@ async function main() {
 		await new Promise((r) => setTimeout(r, 1700))
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1, "still exactly one toast")
-		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+		assert.equal(h.sent[0].title, "NETWORK · My Task")
 	})
 	
 	await test("idle without any prior error still announces READY after the suppress window", async () => {
@@ -433,7 +458,7 @@ async function main() {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "READY FOR REVIEW")
+		assert.equal(h.sent[0].title, "READY · My Task")
 	})
 	
 	await test("generic session.error remains SOMETHING WENT WRONG", async () => {
@@ -442,7 +467,7 @@ async function main() {
 			event: { type: "session.error", properties: { sessionID: "parent", error: { name: "Error", message: "division by zero" } } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "SOMETHING WENT WRONG")
+		assert.equal(h.sent[0].title, "ERROR · My Task")
 		assert.equal(h.sent[0].theme, "error")
 	})
 	
@@ -504,7 +529,7 @@ async function main() {
 			event: { type: "question.asked", properties: { sessionID: "parent", tool: { callID: "c1" } } },
 		})
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "QUESTION FOR YOU")
+		assert.equal(h.sent[0].title, "QUESTION · My Task")
 	})
 	
 	await test("plugin loads without vendored deps (graceful warn, no crash)", async () => {
@@ -532,7 +557,8 @@ async function main() {
 			event: { type: "session.idle", properties: { sessionID: "parent" } },
 		})
 		assert.equal(h.sent.length, 1)
-		assertBody(h.sent[0].message, "My Task")
+		assert.equal(h.sent[0].title, "READY · My Task")
+		assertBody(h.sent[0].message, "You: hi")
 	})
 	
 	await test("session.error deduped within window", async () => {
@@ -563,7 +589,292 @@ async function main() {
 		assert.equal(formatTimestamp(d), "[2026-08-05 09:08:07]")
 	})
 	
-	await test("ready message includes recent steps summary", async () => {
+	await test("ready body carries project · agent · model · diff context", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		const body = h.sent[0].message
+		assert.ok(body.includes("my-project"), "should include project folder")
+		assert.ok(body.includes("Build"), "should include PascalCase agent")
+		assert.ok(body.includes("deepseek-v4.1-flash"), "should include model")
+		assert.ok(body.includes("+12/-3"), "should include diff stats")
+		assert.ok(body.includes("2 files"), "should include file count")
+	})
+	
+	await test("ready body carries latest user prompt and assistant reply", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		const body = h.sent[0].message
+		assert.ok(body.includes("You: hi"), "should include user prompt")
+		assert.ok(body.includes("AI: Done: verified the change"), "should include assistant reply")
+	})
+	
+	await test("showSessionTitle:false restores full title and puts title back in body", async () => {
+		const cfg = { ...baseConfig(), showSessionTitle: false }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].title, "READY FOR REVIEW")
+		assertBody(h.sent[0].message, "My Task")
+	})
+	
+	await test("showPrompt:false / showReply:false remove those lines", async () => {
+		const cfg = { ...baseConfig(), showPrompt: false, showReply: false }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.ok(!h.sent[0].message.includes("You:"), "should NOT include You line")
+		assert.ok(!h.sent[0].message.includes("AI:"), "should NOT include AI line")
+	})
+	
+	await test("promptChars truncates the user prompt excerpt", async () => {
+		const cfg = { ...baseConfig(), promptChars: 4 }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.ok(h.sent[0].message.includes("You: hi"), "short prompt passes through")
+		// A longer prompt is cut to N chars (including the ellipsis).
+		assert.equal(shortenText("abcdefghij", 4), "abc…")
+	})
+	
+	await test("conversationContextFromMessages extracts prompt, reply, agent, model", async () => {
+		const messages = [
+			{ info: { role: "user", agent: "build", model: { modelID: "m1" } }, parts: [{ type: "text", text: "hello" }] },
+			{ info: { role: "assistant", mode: "build", modelID: "m1" }, parts: [{ type: "tool", tool: "bash" }, { type: "text", text: "world" }] },
+		]
+		assert.deepEqual(conversationContextFromMessages(messages), { prompt: "hello", reply: "world", agent: "build", model: "m1", provider: "" })
+	})
+	
+	await test("conversationContextFromMessages skips synthetic text and handles empty input", () => {
+		assert.deepEqual(conversationContextFromMessages([]), { prompt: "", reply: "", agent: "", model: "", provider: "" })
+		const messages = [
+			{ info: { role: "user", agent: "build" }, parts: [{ type: "text", text: "real prompt" }] },
+			{ info: { role: "assistant" }, parts: [{ type: "text", text: "synthetic reminder", synthetic: true }] },
+		]
+		assert.equal(conversationContextFromMessages(messages).reply, "")
+	})
+	
+	await test("formatAgentName turns stored lowercase agents into PascalCase", () => {
+		assert.equal(formatAgentName("orchestrator"), "Orchestrator")
+		assert.equal(formatAgentName("build"), "Build")
+		assert.equal(formatAgentName("plan"), "Plan")
+		assert.equal(formatAgentName("Build"), "Build")
+		assert.equal(formatAgentName(""), "")
+	})
+	
+	await test("resolveModelName reads the provider catalog once and caches it", async () => {
+		let calls = 0
+		const client = {
+			config: {
+				providers: async () => {
+					calls += 1
+					return {
+						data: {
+							providers: [
+								{
+									id: "commandcode",
+									models: {
+										"deepseek/deepseek-v4.1-flash": {
+											id: "deepseek/deepseek-v4.1-flash",
+											name: "[自配][CMDC] DeepSeek V4.1 Flash",
+										},
+									},
+								},
+							],
+						},
+					}
+				},
+			},
+		}
+		assert.equal(await resolveModelName(client, "commandcode", "deepseek/deepseek-v4.1-flash"), "[自配][CMDC] DeepSeek V4.1 Flash")
+		assert.equal(await resolveModelName(client, "commandcode", "deepseek/deepseek-v4.1-flash"), "[自配][CMDC] DeepSeek V4.1 Flash")
+		assert.equal(calls, 1, "catalog should be fetched once")
+	})
+	
+	await test("resolveModelName falls back to provider.list() when config.providers() fails", async () => {
+		const client = {
+			config: { providers: async () => { throw new Error("config providers down") } },
+			provider: {
+				list: async () => ({
+					data: {
+						all: [
+							{
+								id: "minimax-agent",
+								models: {
+									"MiniMax-M3.1-Flash": { id: "MiniMax-M3.1-Flash", name: "[自配][MNMO] MiniMax M3.1 Flash" },
+								},
+							},
+						],
+					},
+				}),
+			},
+		}
+		assert.equal(await resolveModelName(client, "minimax-agent", "MiniMax-M3.1-Flash"), "[自配][MNMO] MiniMax M3.1 Flash")
+		assert.equal(await resolveModelName(client, "minimax-agent", "unknown-model"), "")
+		assert.equal(await resolveModelName(client, "", "MiniMax-M3.1-Flash"), "")
+	})
+	
+	await test("notification meta line uses the model display name when available", async () => {
+		const client = makeSessionClient()
+		client.config = {
+			providers: async () => ({
+				data: {
+					providers: [
+						{
+							id: "opencode",
+							models: {
+								"deepseek-v4.1-flash": { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+							},
+						},
+					],
+				},
+			}),
+		}
+		const h = await makeHarness({ client, config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.ok(h.sent[0].message.includes("DeepSeek V4.1 Flash"), "should include model display name")
+		assert.ok(!h.sent[0].message.includes("deepseek-v4.1-flash"), "should replace the raw model ID")
+	})
+	
+	await test("notification falls back to the model ID when the catalog is unavailable", async () => {
+		const client = makeSessionClient()
+		client.config = { providers: async () => { throw new Error("catalog down") } }
+		const h = await makeHarness({ client, config: baseConfig() })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.ok(h.sent[0].message.includes("deepseek-v4.1-flash"), "should fall back to the model ID")
+	})
+	
+	await test("content templates render the full placeholder map", async () => {
+		const client = makeSessionClient()
+		client.config = {
+			providers: async () => ({
+				data: {
+					providers: [
+						{
+							id: "opencode",
+							models: {
+								"deepseek-v4.1-flash": { id: "deepseek-v4.1-flash", name: "[自配][CMDC] DeepSeek V4.1 Flash" },
+							},
+						},
+					],
+				},
+			}),
+		}
+		const cfg = {
+			...baseConfig(),
+			content: {
+				titleTemplate: "{type} · {sessionTitle} · {agent}",
+				bodyTemplate: [
+					"[{time}] {project} | {agent} | {model} | {modelId} | {modelShort} | {provider}",
+					"S: {sessionId}",
+					"D: {diff} ({additions}/{deletions}/{files})",
+					"You: {prompt}",
+					"AI: {reply}",
+					"Steps: {steps}",
+				],
+				dropEmptyLines: true,
+			},
+		}
+		const h = await makeHarness({ client, config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].title, "READY · My Task · Build")
+		const body = h.sent[0].message
+		assert.match(body, /^\[\d{2}:\d{2}:\d{2}\] my-project \| Build \| \[自配\]\[CMDC\] DeepSeek V4\.1 Flash \| deepseek-v4\.1-flash \| DeepSeek V4\.1 Flash \| opencode/)
+		assert.ok(body.includes("S: parent"))
+		assert.ok(body.includes("D: +12/-3 · 2 files (12/3/2)"))
+		assert.ok(body.includes("You: hi"))
+		assert.ok(body.includes("AI: Done: verified the change"))
+		assert.ok(body.includes("Steps: Read file /a.txt → Bash ls"))
+	})
+	
+	await test("template dropEmptyLines removes fully-empty placeholder lines", async () => {
+		const cfg = {
+			...baseConfig(),
+			showPrompt: false,
+			content: { bodyTemplate: ["A", "You: {prompt}", "B"], dropEmptyLines: true },
+		}
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].message, "A\nB")
+	})
+	
+	await test("template dropEmptyLines:false keeps empty placeholder lines", async () => {
+		const cfg = {
+			...baseConfig(),
+			showPrompt: false,
+			content: { bodyTemplate: ["A", "You: {prompt}", "B"], dropEmptyLines: false },
+		}
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.ok(h.sent[0].message.includes("You:"))
+	})
+	
+	await test("template keeps unknown placeholders visible and supports string bodies", async () => {
+		const cfg = { ...baseConfig(), content: { bodyTemplate: "X {unknown} Y\n{type}" } }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].message, "X {unknown} Y\nREADY")
+	})
+	
+	await test("template {status}/{error}/{fallback} for errors", async () => {
+		const cfg = { ...baseConfig(), content: { bodyTemplate: "{status}\n{error}\n{fallback}" } }
+		const h = await makeHarness({ client: makeSessionClient(), config: cfg })
+		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "boom" } } })
+		assert.equal(h.sent[0].message, "boom\nboom\nSomething went wrong")
+	})
+	
+	await test("showContext:false blanks {meta} but keeps granular {agent}/{model}", async () => {
+		const client = makeSessionClient()
+		client.config = {
+			providers: async () => ({
+				data: {
+					providers: [
+						{ id: "opencode", models: { "deepseek-v4.1-flash": { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" } } },
+					],
+				},
+			}),
+		}
+		const cfg = {
+			...baseConfig(),
+			showContext: false,
+			content: { bodyTemplate: ["{meta}", "A: {agent}", "M: {model}"] },
+		}
+		const h = await makeHarness({ client, config: cfg })
+		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
+		assert.equal(h.sent[0].message, "A: Build\nM: DeepSeek V4.1 Flash")
+	})
+	
+	await test("buildToastTitle: short label + session title, truncated to sessionTitleChars", () => {
+		assert.equal(buildToastTitle("ready", { title: "My Task" }, { showSessionTitle: true, sessionTitleChars: 40 }), "READY · My Task")
+		assert.equal(buildToastTitle("ready", { title: "x".repeat(80) }, { showSessionTitle: true, sessionTitleChars: 10 }), `READY · ${"x".repeat(9)}…`)
+		assert.equal(buildToastTitle("ready", { title: "My Task" }, { showSessionTitle: false }), "READY FOR REVIEW")
+	})
+	
+	await test("permission.updated with session context uses CONFIRM · title and permission text", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "permission.updated", properties: { id: "p2", sessionID: "parent", title: "Bash wants to run rm -rf" } },
+		})
+		assert.equal(h.sent[0].title, "CONFIRM · My Task")
+		assertBody(h.sent[0].message, "Bash wants to run rm -rf")
+		assertBody(h.sent[0].message, "You: hi")
+	})
+	
+	await test("question.asked extracts the question text from the payload", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone.event({
+			event: { type: "question.asked", properties: { sessionID: "parent", questions: [{ question: "Which branch?" }], tool: { callID: "c2" } } },
+		})
+		assert.equal(h.sent[0].title, "QUESTION · My Task")
+		assertBody(h.sent[0].message, "Which branch?")
+	})
+	
+	await test("question tool.before + question.asked share one dedupe key (one toast)", async () => {
+		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
+		await h.pluginDone["tool.execute.before"]({ sessionID: "parent", tool: "question", callID: "c1" })
+		await h.pluginDone.event({
+			event: { type: "question.asked", properties: { sessionID: "parent", tool: { callID: "c1" } } },
+		})
+		assert.equal(h.sent.length, 1, "the two question paths must dedupe together")
+	})
+	
+	await test("ready body includes recent steps summary", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.ok(h.sent[0].message.includes("Steps:"), "should include Steps line")
@@ -788,7 +1099,7 @@ async function main() {
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1, "only the network toast, no READY")
-		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+		assert.equal(h.sent[0].title, "NETWORK · My Task")
 	})
 	
 	await test("ESC/user-stop idle sends STOPPED BY YOU with cancelled theme", async () => {
@@ -803,7 +1114,7 @@ async function main() {
 		const h = await makeHarness({ client: abortClient, config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		assert.equal(h.sent[0].theme, "cancelled")
 	})
 	
@@ -820,7 +1131,7 @@ async function main() {
 		const h = await makeHarness({ client: abortClient, config: cfg })
 		await h.pluginDone.event({ event: { type: "session.idle", properties: { sessionID: "parent" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "READY FOR REVIEW")
+		assert.equal(h.sent[0].title, "READY · My Task")
 	})
 	
 	await test("double-ESC: network error right after user-cancel is suppressed", async () => {
@@ -835,7 +1146,7 @@ async function main() {
 		// 1st ESC -> user-cancel toast.
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "This operation was aborted" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		// Wait past the 1.5s errorDedupe window (real clock) so the 2nd error
 		// actually reaches handleSessionError; the fake clock keeps it inside the
 		// 5s cancel window.
@@ -846,7 +1157,7 @@ async function main() {
 		// must NOT be announced as NETWORK INTERRUPTED.
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
 		assert.equal(h.sent.length, 1, "network toast suppressed after user-cancel")
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 	})
 	
 	await test("network error long after user-cancel is NOT suppressed", async () => {
@@ -859,21 +1170,21 @@ async function main() {
 		}
 		const h = await makeHarness({ client, config: baseConfig(), now: () => clock })
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "This operation was aborted" } } })
-		assert.equal(h.sent[0].title, "STOPPED BY YOU")
+		assert.equal(h.sent[0].title, "STOPPED · My Task")
 		// Past errorDedupe's 1.5s (real clock) AND past the 5s cancel window
 		// (fake clock), so the network error must fire normally.
 		await new Promise((r) => setTimeout(r, 1600))
 		clock += 60_000
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
 		assert.equal(h.sent.length, 2, "real network error fires after the window")
-		assert.equal(h.sent[1].title, "NETWORK INTERRUPTED")
+		assert.equal(h.sent[1].title, "NETWORK · My Task")
 	})
 	
 	await test("network error WITHOUT a prior user-cancel still fires", async () => {
 		const h = await makeHarness({ client: makeSessionClient(), config: baseConfig() })
 		await h.pluginDone.event({ event: { type: "session.error", properties: { sessionID: "parent", error: "fetch failed: read ECONNRESET" } } })
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "NETWORK INTERRUPTED")
+		assert.equal(h.sent[0].title, "NETWORK · My Task")
 	})
 	
 	console.log("heartbeat watchdog:")
@@ -891,7 +1202,7 @@ async function main() {
 		clock += 5000 // way past stallSec with zero activity
 		await h.pluginDone.heartbeatTick()
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "SESSION ENDED")
+		assert.equal(h.sent[0].title, "ENDED · My Task")
 		await h.pluginDone.heartbeatTick()
 		assert.equal(h.sent.length, 1, "no duplicate backfill")
 	})
@@ -926,7 +1237,7 @@ async function main() {
 		clock += 5000
 		await h.pluginDone.heartbeatTick()
 		assert.equal(h.sent.length, 1)
-		assert.equal(h.sent[0].title, "SESSION STALLED")
+		assert.equal(h.sent[0].title, "STALLED · My Task")
 	})
 	
 	await test("heartbeat does NOT backfill a run another instance already reported", async () => {
@@ -1153,6 +1464,20 @@ async function main() {
 		const i = captured.indexOf("-p")
 		assert.ok(i >= 0, "should pass a banner")
 		assert.ok(captured[i + 1].includes(path.join("assets", "opencode-notify-banner-ready.png")), "flat banner path")
+	})
+	
+	await test("sendWindowsToast omits the hero banner when showBanner=false", async () => {
+		let captured = null
+		const spawn = (cmd, args) => {
+			captured = args
+			return { unref: () => {} }
+		}
+		sendWindowsToast(
+			{ title: "T", message: "M", theme: "ready", showBanner: false },
+			{ platform: "win32", snoreToastExe: "C:\\snoretoast.exe", spawn },
+		)
+		await new Promise((r) => setTimeout(r, 60))
+		assert.equal(captured.includes("-p"), false, "should not pass a banner")
 	})
 	
 	console.log(`\n${passed} passed, ${failed} failed`)

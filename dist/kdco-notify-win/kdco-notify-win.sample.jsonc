@@ -56,8 +56,53 @@
 	// Max number of recent tool steps folded into the summary line.
 	"summarySteps": 3,
 
+	// Put the session title into the toast TITLE (Windows' largest font):
+	//   "READY · Fix login flow"
+	// false restores the fixed title and moves the session title into the body.
+	"showSessionTitle": true,
+
+	// Max characters of the session title used in the toast title.
+	"sessionTitleChars": 40,
+
+	// Show the context line under the timestamp:
+	//   "<project folder> · <Agent> · <model name> · +12/-3 · 2 files"
+	"showContext": true,
+
+	// Show the latest user prompt excerpt as a "You:" line.
+	"showPrompt": true,
+
+	// Max characters of the user prompt excerpt.
+	"promptChars": 80,
+
+	// Show the latest assistant reply excerpt as an "AI:" line.
+	"showReply": true,
+
+	// Max characters of the assistant reply excerpt.
+	"replyChars": 100,
+
+	// Optional content template override. Empty = built-in layout.
+	// Placeholders use {name}; see README "Content templates" for the full list.
+	// Example:
+	//   "titleTemplate": "{type} · {sessionTitle}",
+	//   "bodyTemplate": [
+	//     "[{timestamp}]  {meta}",
+	//     "{status}",
+	//     "You: {prompt}",
+	//     "AI: {reply}",
+	//     "Steps: {steps}"
+	//   ],
+	"content": {
+		"titleTemplate": "",
+		"bodyTemplate": [],
+		"dropEmptyLines": true
+	},
+
 	// Color each notification theme with a distinct hero banner.
 	"themedIcons": true,
+
+	// Show the large hero banner image. false drops it so title/body text
+	// dominates the toast (more room for session context).
+	"showBanner": true,
 
 	// Icon set: "flat" (full gradient) or "legacy" (square blue block + border).
 	"iconTheme": "legacy",

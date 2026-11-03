@@ -71,14 +71,93 @@ The plugin loads standalone even if deps are missing, but logs a warning instead
 
 | Event | Notifies? | Title |
 |-------|-----------|-------|
-| Session complete (`session.idle`) | Yes | READY FOR REVIEW |
-| Session error | Yes | SOMETHING WENT WRONG |
-| Network / HTTP interruption | Yes | **NETWORK INTERRUPTED** (+ system beep) |
-| Run stopped by user (ESC / cancel) | Yes (`notifyCancelled`) | **STOPPED BY YOU** |
-| Session ended silently, never emitted an event | Yes (heartbeat) | **SESSION ENDED** |
-| Permission needed | Yes | WAITING FOR CONFIRMATION |
-| Question asked | Yes | QUESTION FOR YOU |
+| Session complete (`session.idle`) | Yes | **READY · &lt;session title&gt;** |
+| Session error | Yes | **ERROR · &lt;session title&gt;** |
+| Network / HTTP interruption | Yes | **NETWORK · &lt;session title&gt;** (+ system beep) |
+| Run stopped by user (ESC / cancel) | Yes (`notifyCancelled`) | **STOPPED · &lt;session title&gt;** |
+| Session ended silently, never emitted an event | Yes (heartbeat) | **ENDED · &lt;session title&gt;** |
+| Permission needed | Yes | **CONFIRM · &lt;session title&gt;** |
+| Question asked | Yes | **QUESTION · &lt;session title&gt;** |
 | Sub-task events | No (default) | Set `notifyChildSessions: true` to include |
+
+The session title is promoted into the toast **title** (the largest text Windows
+renders), so several concurrent agents are distinguishable at a glance. Set
+`showSessionTitle: false` to restore the old fixed labels; the session title then
+moves back into the body.
+
+### What the toast shows
+
+```
+READY · Fix login flow
+
+[2026-11-03 14:23:11]  my-project · Build · DeepSeek V4.1 Flash · +12/-3 · 2 files
+You: fix the login redirect loop
+AI: Fixed the redirect loop and added a regression test.
+Steps: Read src/auth.ts → Edit src/auth.ts → Bash npm test
+```
+
+- **Title** — notification kind + session title (`sessionTitleChars`, default 40).
+- **Context line** — project folder · Agent · model · diff stats (`showContext`). Agent names are displayed in PascalCase (`orchestrator` → `Orchestrator`); the model uses the provider catalog display name when available, otherwise the raw model ID.
+- **`You:` line** — latest real user prompt excerpt (`showPrompt`, `promptChars`, default 80).
+- **`AI:` line** — latest assistant reply excerpt (`showReply`, `replyChars`, default 100).
+- **`Steps:` line** — recent tool steps for ready/ended toasts (`showSummary`, `summarySteps`).
+
+Error / permission / question toasts use the same identifying context, with the
+error text, permission request title, or question text as the first body line
+after the context line. Each line can be disabled independently, so a compact
+two-line toast is one config change away.
+
+### Content templates (optional)
+
+The built-in layout is intentionally not a template: title and body are composed
+by the plugin. To fine-tune the structure, set `content.titleTemplate` and/or
+`content.bodyTemplate`; any `{name}` placeholder is replaced with the
+notification's data.
+
+```jsonc
+"content": {
+  "titleTemplate": "{type} · {sessionTitle}",
+  "bodyTemplate": [
+    "[{timestamp}]  {meta}",
+    "{status}",
+    "You: {prompt}",
+    "AI: {reply}",
+    "Steps: {steps}"
+  ],
+  "dropEmptyLines": true
+}
+```
+
+`bodyTemplate` accepts an array of lines or a single string (split on newlines).
+`dropEmptyLines` (default `true`) removes a line when **all** of its known
+placeholders are empty, so `You:`/`AI:` lines don't appear without a value.
+Unknown placeholders stay visible (`{typo}`), which makes typos obvious.
+
+| Placeholder | Value |
+|---|---|
+| `{type}` / `{typeFull}` | `READY` / `READY FOR REVIEW` (short / full kind label) |
+| `{sessionTitle}` | session title (`sessionTitleChars`) |
+| `{sessionId}` | session ID |
+| `{project}` / `{cwd}` | project folder name / full working directory |
+| `{agent}` / `{agentId}` | PascalCase agent (`Orchestrator`) / raw value (`orchestrator`) |
+| `{model}` / `{modelName}` | model display name (falls back to the model ID) |
+| `{modelShort}` | display name with leading `[..]` tags removed |
+| `{modelId}` / `{provider}` | raw model ID / provider ID |
+| `{meta}` | pre-joined `project · Agent · model · diff` (empty when `showContext:false`) |
+| `{timestamp}` / `{date}` / `{time}` | `[yyyy-MM-dd HH:mm:ss]` / `yyyy-MM-dd` / `HH:mm:ss` |
+| `{diff}` | `+12/-3 · 2 files` |
+| `{additions}` / `{deletions}` / `{files}` | individual diff numbers |
+| `{prompt}` / `{reply}` | latest user prompt / assistant reply excerpt |
+| `{steps}` | recent tool steps (ready/ended only) |
+| `{primary}` | kind-specific primary text (error / permission / question / stalled) |
+| `{status}` | `primary` when present, otherwise `fallback` |
+| `{error}` / `{permissionTitle}` / `{question}` | individual event fields |
+| `{fallback}` | kind fallback (`Session stopped`, etc.) |
+
+`showTimestamp`, `showPrompt`, `showReply`, `showSummary`, and `showContext` still
+gate the corresponding values (`{timestamp}`, `{prompt}`, `{reply}`, `{steps}`,
+and `{meta}` respectively). Granular variables such as `{agent}` and `{model}`
+remain available even when `showContext:false`.
 
 Behavior: parent-session filtering (no sub-task spam), quiet-hours suppression, 1.5s dedupe windows, and terminal detection (for logging/context only — Windows has no focus suppression).
 
@@ -163,7 +242,20 @@ An annotated sample template (inert, never loaded by the plugin) ships as `kdco-
   "showTimestamp": true,
   "showSummary": true,
   "summarySteps": 3,
+  "showSessionTitle": true,
+  "sessionTitleChars": 40,
+  "showContext": true,
+  "showPrompt": true,
+  "promptChars": 80,
+  "showReply": true,
+  "replyChars": 100,
+  "content": {
+    "titleTemplate": "",
+    "bodyTemplate": [],
+    "dropEmptyLines": true
+  },
   "themedIcons": true,
+  "showBanner": true,
   "iconTheme": "legacy",
   "soundOverride": "",
   "clickMode": "off",
@@ -204,9 +296,15 @@ Notes:
 - **Precise-tab limitation** — Windows Terminal exposes no stable public CLI to focus an *arbitrary* tab by title. `-w 0` reuses the most recent *window* (whose title mirrors the focused tab); exact per-session tab pinning is best-effort and not guaranteed.
 - **`logging`** — optional Diagnostic file logging. `enabled: true` + `minLogLevel: "ALL"` writes every classified event (`L1001` raw payload, `L1002` config source, `L2001`/`L2002` error category, `L2010`–`L2012` READY decisions, `L3001`/`L3002` toast dispatch) to `%TEMP%\kdcokenny-notify-win\{yyyy-MM-dd}-kdcokenny-notify-win.log`. `logDir` overrides the folder; `enabled: false` (equivalent to `minLogLevel: "NO"`) turns file logging off entirely; `minLogLevel` (`ALL`/`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`NO`, default `WARN`) and `moduleLogLevels` gate verbosity. The `logging` section is hot-reloaded when the config file changes (even from disabled → enabled, no restart needed).
 - `terminal` (optional) overrides terminal auto-detection.
-- **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`).
-- **`showSummary` / `summarySteps`** — for READY notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).
+- **`showTimestamp`** — prepend a `[yyyy-MM-dd HH:mm:ss]` line to the notification body (default `true`). When `showContext` is on, the context line shares this line to save vertical space.
+- **`showSummary` / `summarySteps`** — for READY and ENDED notifications, append a one-line summary of the last N tool steps fetched from the session (default `true`, `3`).
+- **`showSessionTitle` / `sessionTitleChars`** — promote the session title into the toast title (`READY · Fix login flow`) and cap its length (default `true`, `40`). Set `false` for the old fixed titles; the session title then appears in the body.
+- **`showContext`** — show a compact context line: project folder · agent · model · `+adds/-dels · N files` (default `true`). Missing fields are simply omitted.
+- **`showPrompt` / `promptChars`** — show the latest real user prompt as a `You:` line, capped at N characters (default `true`, `80`). Synthetic/system-injected text is ignored.
+- **`showReply` / `replyChars`** — show the latest assistant reply as an `AI:` line, capped at N characters (default `true`, `100`).
+- **`content`** — optional `titleTemplate` / `bodyTemplate` placeholders to restructure the notification. Empty values keep the built-in layout. See "Content templates" above for the full placeholder list.
 - **`themedIcons`** — use the per-kind colored hero banner (ready=green, error=orange, network=red, permission=yellow, question=blue, cancelled=grey) when the asset exists (default `true`).
+- **`showBanner`** — show the large hero banner image at all (default `true`). Set `false` to drop the 620x180 image so the session title and conversation context dominate the toast; the header app icon is unaffected.
 - `quietHours` supports overnight windows (e.g. `22:00`–`08:00`).
 
 ## Development

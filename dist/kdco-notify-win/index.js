@@ -9,6 +9,9 @@
  *  - Windows Toast notifications via SnoreToast (direct invocation, branded)
  *    with a custom appID + banner image + Start-Menu-registered app icon
  *  - Task complete / error / permission / question notifications
+ *  - Session-aware content: the session title shares the toast title, with a
+ *    context line (project · agent · model · diff), latest user prompt, latest
+ *    assistant reply and recent tool steps in the body
  *  - Quiet-hours suppression
  *  - Parent-session filtering (no sub-task spam) + 1.5s dedupe windows
  *    (timestamps shared across plugin instances via a tmpdir store)
@@ -545,6 +548,9 @@ function normalizeToastSound(sound) {
  * @returns {string | undefined}
  */
 function resolveBannerPath(opts, overrides = {}) {
+	// `showBanner:false` gives the text more visual weight by dropping the
+	// 620x180 hero image entirely (the app icon in the header still shows).
+	if (opts?.showBanner === false) return undefined
 	const fsApi = overrides.fsApi ?? moduleRequire("node:fs")
 	// `iconTheme` on opts selects the icon set (from config). Fall back to flat.
 	const assets = resolveIconTheme(opts?.iconTheme)
@@ -606,8 +612,47 @@ const DEFAULT_CONFIG = {
 	showSummary: true,
 	/** Max number of recent tool steps to fold into the summary line. */
 	summarySteps: 3,
+	/**
+	 * Put the session title into the toast TITLE, which Windows renders in the
+	 * largest font: "READY · Fix login flow". When false, the old fixed title is
+	 * kept and the session title moves back into the body.
+	 */
+	showSessionTitle: true,
+	/** Max characters of the session title used in the toast title. */
+	sessionTitleChars: 40,
+	/**
+	 * Show a compact context line under the timestamp:
+	 * "<project folder> · <agent> · <model> · +12/-3 · 2 files".
+	 */
+	showContext: true,
+	/** Show the latest user prompt excerpt as a "You:" line. */
+	showPrompt: true,
+	/** Max characters of the user prompt excerpt. */
+	promptChars: 80,
+	/** Show the latest assistant reply excerpt as an "AI:" line. */
+	showReply: true,
+	/** Max characters of the assistant reply excerpt. */
+	replyChars: 100,
+	/**
+	 * Optional content template override. Leave both empty to use the built-in
+	 * layout. Placeholders use `{name}`; see README "Content templates".
+	 *
+	 *   titleTemplate: "{type} · {sessionTitle}"
+	 *   bodyTemplate:  ["[{timestamp}]  {meta}", "{status}", "You: {prompt}",
+	 *                   "AI: {reply}", "Steps: {steps}"]
+	 */
+	content: {
+		titleTemplate: "",
+		bodyTemplate: [],
+		dropEmptyLines: true,
+	},
 	/** Colors each notification theme with a distinct hero banner (red/yellow/orange/green). */
 	themedIcons: true,
+	/**
+	 * Show the large hero banner image. false drops it so the title/body text
+	 * dominates the toast (useful when many notifications must be told apart).
+	 */
+	showBanner: true,
 	/**
 	 * Icon set used for the toast icon + hero banner:
 	 *   "flat"   -> full themed gradient background + white logo
@@ -1089,36 +1134,57 @@ async function isParentSession(client, sessionID) {
 }
 
 /**
- * Resolve { title, cwd } for a session, preferring the info carried on the
- * event (cheapest) and falling back to a session fetch. cwd feeds the click-to-
+ * Normalize a session-like object (event info or `session.get` data) into the
+ * context the notification body needs. The title is kept long here and only
+ * shortened at render time, so each surface can pick its own budget.
+ * @param {any} data
+ * @returns {{title:string, cwd?:string, directory?:string, summary?:any, updated?:number}}
+ */
+function normalizeSessionContext(data) {
+	const title = data?.title ?? data?.slug
+	const directory = data?.directory ?? data?.cwd ?? data?.workspace ?? data?.path?.cwd
+	const cwd = data?.cwd ?? data?.workspace ?? data?.directory ?? data?.path?.cwd
+	return {
+		title: title ? String(title).slice(0, 200) : "Task",
+		cwd: cwd ? String(cwd) : undefined,
+		directory: directory ? String(directory) : undefined,
+		summary: data?.summary,
+		updated: data?.time?.updated ?? undefined,
+	}
+}
+
+/**
+ * Resolve session context for a notification, preferring the info carried on
+ * the event (cheapest) and falling back to a session fetch. Event info often
+ * carries only a title; when it lacks directory/summary we still fetch once so
+ * the context line can show the project and diff stats. cwd feeds the click-to-
  * open targets ({{cwd}} placeholder).
  */
 async function getSessionContext(client, sessionID, info) {
-	try {
-		const eventTitle = info?.title ?? info?.slug
-		if (eventTitle) {
-			return {
-				title: String(eventTitle).slice(0, 50),
-				cwd: info?.cwd ?? info?.directory ? String(info?.cwd ?? info?.directory) : undefined,
-				updated: info?.time?.updated ?? undefined,
-			}
-		}
-	} catch {
-		// fall through
-	}
+	const eventTitle = info?.title ?? info?.slug
+	const eventContext = eventTitle ? normalizeSessionContext(info) : null
+	// Event info is only good enough when it carries the richer fields too.
+	if (eventContext && (eventContext.directory || eventContext.summary)) return eventContext
 	try {
 		const session = await client.session.get({ path: { id: sessionID } })
-		const data = session?.data ?? {}
-		const title = data.title ?? data.slug
-		const cwd = data.cwd ?? data.workspace ?? data.directory
-		return {
-			title: title ? String(title).slice(0, 50) : "Task",
-			cwd: cwd ? String(cwd) : undefined,
-			updated: data?.time?.updated ?? undefined,
-		}
+		const data = session?.data
+		if (data) return normalizeSessionContext(data)
 	} catch {
-		return { title: "Task", cwd: undefined, updated: undefined }
+		// fall through to whatever the event gave us
 	}
+	return eventContext ?? normalizeSessionContext({})
+}
+
+/**
+ * Format a Date as local date/time parts plus the legacy bracketed timestamp.
+ * @param {Date} [date]
+ * @returns {{date:string, time:string, timestamp:string}}
+ */
+function timestampParts(date = new Date()) {
+	const p = (n) => String(n).padStart(2, "0")
+	const datePart = `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+	const timePart = `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`
+	return { date: datePart, time: timePart, timestamp: `[${datePart} ${timePart}]` }
 }
 
 /**
@@ -1127,8 +1193,7 @@ async function getSessionContext(client, sessionID, info) {
  * @returns {string}
  */
 export function formatTimestamp(date = new Date()) {
-	const p = (n) => String(n).padStart(2, "0")
-	return `[${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}]`
+	return timestampParts(date).timestamp
 }
 
 /**
@@ -1159,6 +1224,254 @@ async function loadSessionMessages(client, sessionID) {
 	} catch {
 		return []
 	}
+}
+
+/**
+ * Collapse all whitespace to single spaces and truncate to `maxChars`.
+ * Returns "" for empty input. Non-finite/zero max keeps the whole string.
+ * @param {any} value
+ * @param {number} [maxChars]
+ * @returns {string}
+ */
+export function shortenText(value, maxChars) {
+	const text = String(value ?? "").replace(/\s+/g, " ").trim()
+	if (!text) return ""
+	const max = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 0
+	if (!max || text.length <= max) return text
+	return text.slice(0, Math.max(1, max - 1)).trimEnd() + "…"
+}
+
+/**
+ * Display an agent/mode name in PascalCase. OpenCode stores these lowercase
+ * ("orchestrator", "build", "plan"), but the UI shows "Orchestrator", "Build",
+ * "Plan". Only the first character is touched, so already-cased names and
+ * names with internal capitals are preserved.
+ * @param {any} value
+ * @returns {string}
+ */
+export function formatAgentName(value) {
+	const name = String(value ?? "").trim()
+	if (!name) return ""
+	return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
+/**
+ * Extract human-written text from message parts. Skips synthetic/ignored text
+ * (system-injected reminders) so notifications show what the user/AI actually
+ * said.
+ * @param {any[]} parts
+ * @param {{lastOnly?:boolean}} [opts]
+ * @returns {string}
+ */
+function textFromParts(parts, opts = {}) {
+	if (!Array.isArray(parts)) return ""
+	const chunks = []
+	for (const part of parts) {
+		if (part?.type !== "text") continue
+		if (part.synthetic || part.ignored) continue
+		const text = typeof part.text === "string" ? part.text.trim() : ""
+		if (text) chunks.push(text)
+	}
+	if (chunks.length === 0) return ""
+	return opts.lastOnly ? chunks[chunks.length - 1] : chunks.join(" ")
+}
+
+/**
+ * Pull the conversation context that identifies WHAT this notification is about:
+ * the latest user prompt, the latest assistant reply, the agent/model used, and
+ * the provider ID (needed to resolve a human-readable model name).
+ * Falls back to empty strings so callers can omit individual lines.
+ *
+ * @param {any[]} items session timeline (each item: `{ info, parts }`)
+ * @returns {{prompt:string, reply:string, agent:string, model:string, provider:string}}
+ */
+export function conversationContextFromMessages(items) {
+	const context = { prompt: "", reply: "", agent: "", model: "", provider: "" }
+	if (!Array.isArray(items) || items.length === 0) return context
+
+	// Newest user message with real text = the prompt that started this run.
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]
+		const info = item?.info ?? item
+		if (info?.role !== "user") continue
+		const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
+		const prompt = textFromParts(parts)
+		if (!prompt) continue
+		context.prompt = prompt
+		context.agent = info?.agent ? String(info.agent) : ""
+		context.model = info?.model?.modelID ? String(info.model.modelID) : ""
+		context.provider = info?.model?.providerID ? String(info.model.providerID) : ""
+		break
+	}
+
+	// Newest assistant text part = the final reply (not intermediate narration).
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]
+		const info = item?.info ?? item
+		if (info?.role !== "assistant") continue
+		const parts = Array.isArray(item?.parts) ? item.parts : Array.isArray(info?.parts) ? info.parts : []
+		const reply = textFromParts(parts, { lastOnly: true })
+		if (!reply) continue
+		context.reply = reply
+		if (!context.agent && info?.mode) context.agent = String(info.mode)
+		if (!context.model && info?.modelID) context.model = String(info.modelID)
+		if (!context.provider && info?.providerID) context.provider = String(info.providerID)
+		break
+	}
+	return context
+}
+
+/**
+ * Strip leading bracketed annotations from a model display name:
+ * "[自配][CMDC] DeepSeek V4.1 Flash" -> "DeepSeek V4.1 Flash".
+ * Falls back to the original string when stripping leaves nothing.
+ * @param {any} value
+ * @returns {string}
+ */
+export function shortenModelName(value) {
+	const text = String(value ?? "").trim()
+	if (!text) return ""
+	const bare = text.replace(/^(?:\s*\[[^\]]*\])+\s*/, "").trim()
+	return bare || text
+}
+
+/**
+ * Format session diff stats: "+12/-3 · 2 files". Empty when unavailable.
+ * @param {any} summary
+ * @returns {string}
+ */
+function buildDiffText(summary) {
+	const additions = Number(summary?.additions)
+	const deletions = Number(summary?.deletions)
+	if (!Number.isFinite(additions) || !Number.isFinite(deletions) || (!additions && !deletions)) return ""
+	const files = Number(summary?.files)
+	const filesBit = Number.isFinite(files) && files > 0 ? ` · ${files} file${files === 1 ? "" : "s"}` : ""
+	return `+${additions}/-${deletions}${filesBit}`
+}
+
+/**
+ * Build the compact context line shown under the timestamp:
+ * `<project folder> · <agent> · <model> · +adds/-dels · N files`.
+ * Empty when `showContext` is false or nothing is known.
+ * @param {{title?:string, cwd?:string, directory?:string, summary?:any}} ctx
+ * @param {{agent?:string, model?:string, modelName?:string}} conv
+ * @param {any} config
+ * @returns {string[]}
+ */
+function contextMetaBits(ctx, conv, config) {
+	if (config.showContext === false) return []
+	const bits = []
+	const dir = String(ctx?.directory ?? ctx?.cwd ?? "").replace(/[\\/]+$/, "")
+	const project = dir ? path.basename(dir) : ""
+	if (project) bits.push(project)
+	if (conv?.agent) bits.push(formatAgentName(conv.agent))
+	// `{model}` means the human-readable name; the raw ID is `{modelId}`.
+	if (conv?.model) bits.push(conv.modelName || conv.model)
+	const diff = buildDiffText(ctx?.summary)
+	if (diff) bits.push(diff)
+	return bits
+}
+
+// Provider catalogs rarely change; cache per client for 10 minutes. A WeakMap
+// keeps the cache scoped to the plugin instance (and lets tests use fresh
+// clients without cross-test leakage).
+const MODEL_CATALOG_TTL_MS = 10 * 60 * 1000
+const modelCatalogCache = new WeakMap()
+
+/** Flatten a provider catalog into `providerID/modelID -> display name`. */
+function modelNamesFromProviders(providers) {
+	const names = new Map()
+	for (const provider of Array.isArray(providers) ? providers : []) {
+		const providerID = provider?.id
+		if (!providerID) continue
+		const models = provider?.models ?? {}
+		for (const [key, model] of Object.entries(models)) {
+			const name = typeof model?.name === "string" ? model.name.trim() : ""
+			if (!name) continue
+			const modelID = model?.id ? String(model.id) : String(key)
+			names.set(`${providerID}/${modelID}`, name)
+			names.set(`${providerID}/${key}`, name)
+		}
+	}
+	return names
+}
+
+/**
+ * Load the provider catalog once per client/TTL. Prefers `config.providers()`
+ * (the same source the TUI/CLI uses) and falls back to `provider.list()`.
+ * Any failure degrades to an empty map so notifications still render the ID.
+ * @param {any} client
+ * @returns {Promise<Map<string,string>>}
+ */
+async function loadModelNameCatalog(client) {
+	if (!client) return new Map()
+	const cached = modelCatalogCache.get(client)
+	if (cached && Date.now() - cached.at < MODEL_CATALOG_TTL_MS) return cached.names
+	let providers = []
+	try {
+		if (typeof client.config?.providers === "function") {
+			const res = await client.config.providers()
+			providers = res?.data?.providers ?? res?.providers ?? []
+		}
+	} catch {
+		// Fall through to provider.list() below.
+		providers = []
+	}
+	if ((!Array.isArray(providers) || providers.length === 0) && typeof client.provider?.list === "function") {
+		try {
+			const res = await client.provider.list()
+			providers = res?.data?.all ?? res?.all ?? []
+		} catch {
+			providers = []
+		}
+	}
+	const names = modelNamesFromProviders(providers)
+	if (names.size > 0) modelCatalogCache.set(client, { at: Date.now(), names })
+	return names
+}
+
+/**
+ * Resolve a model's human-readable name. Returns "" when the provider catalog
+ * is unavailable or the model is unknown; callers fall back to the model ID.
+ * @param {any} client
+ * @param {string|undefined} providerID
+ * @param {string|undefined} modelID
+ * @returns {Promise<string>}
+ */
+export async function resolveModelName(client, providerID, modelID) {
+	if (!providerID || !modelID) return ""
+	const names = await loadModelNameCatalog(client)
+	return names.get(`${providerID}/${modelID}`) ?? ""
+}
+
+// Full labels keep the old behavior (and read well alone); short labels are
+// used when the session title shares the title bar and space is precious.
+const TITLE_LABELS = {
+	ready: { full: "READY FOR REVIEW", short: "READY" },
+	error: { full: "SOMETHING WENT WRONG", short: "ERROR" },
+	network: { full: "NETWORK INTERRUPTED", short: "NETWORK" },
+	cancelled: { full: "STOPPED BY YOU", short: "STOPPED" },
+	permission: { full: "WAITING FOR CONFIRMATION", short: "CONFIRM" },
+	question: { full: "QUESTION FOR YOU", short: "QUESTION" },
+	ended: { full: "SESSION ENDED", short: "ENDED" },
+	stalled: { full: "SESSION STALLED", short: "STALLED" },
+}
+
+/**
+ * Build the toast title. With `showSessionTitle` (default) the session title
+ * shares the large title area: `READY · Fix login flow`. Without it the old
+ * full label is returned unchanged.
+ * @param {string} kind
+ * @param {{title?:string}} ctx
+ * @param {any} [config]
+ * @returns {string}
+ */
+export function buildToastTitle(kind, ctx, config = {}) {
+	const labels = TITLE_LABELS[kind] ?? { full: "", short: "" }
+	if (config.showSessionTitle === false) return labels.full
+	const session = shortenText(ctx?.title, config.sessionTitleChars ?? 40)
+	if (!session) return labels.full
+	return `${labels.short || labels.full} · ${session}`
 }
 
 /**
@@ -1471,6 +1784,7 @@ export function createNotifyPlugin(overrides = {}) {
 			sound,
 			theme,
 			iconTheme: config.iconTheme,
+			showBanner: config.showBanner,
 			clickMode,
 			clickProgram,
 			clickArgs,
@@ -1524,27 +1838,174 @@ export function createNotifyPlugin(overrides = {}) {
 			return extras
 		}
 
-		// Compose the multi-line notification body:
-		//   [2026-08-05 14:23:11]
-		//   <session title / error message>
-		//   Steps: Read file X → Bash ls   (when available & enabled)
-		const composeMessage = async ({ kind, title, fallback, steps }) => {
+		// Attach the human-readable model name (falling back to the ID) so
+		// composeMessage()/the future content template can expose `{model}`.
+		const attachModelName = async (conv) => ({
+			...conv,
+			modelName: await resolveModelName(client, conv?.provider, conv?.model),
+		})
+
+		// Compose the multi-line notification body. The session title lives in the
+		// toast TITLE (large font); the body carries the identifying context:
+		//   [2026-08-05 14:23:11]  project · agent · model · +12/-3 · 2 files
+		//   <error message / permission title / fallback>
+		//   You: <last user prompt excerpt>
+		//   AI: <last assistant reply excerpt>
+		//   Steps: Read file X → Bash ls            (ready / ended only)
+		const composeMessage = ({ kind, ctx = {}, conv = {}, primary, fallback, steps }) => {
 			const lines = []
-			if (config.showTimestamp !== false) lines.push(formatTimestamp())
-			if (title) lines.push(title)
-			else if (fallback) lines.push(fallback)
-			if (kind === "ready" && config.showSummary && config.summarySteps && config.summarySteps > 0) {
-				// `steps` may be precomputed by the caller to avoid a second fetch.
-				const summary = steps !== undefined ? steps : await buildStepSummary(client, currentSessionID, config.summarySteps)
-				if (summary) lines.push(`Steps: ${summary}`)
+			const meta = contextMetaBits(ctx, conv, config)
+			const timestamp = config.showTimestamp !== false ? formatTimestamp() : ""
+			const head = [timestamp, meta.join(" · ")].filter(Boolean).join("  ")
+			if (head) lines.push(head)
+
+			// With the session title promoted to the toast title, only show it in
+			// the body when that promotion is disabled (preserves the old layout).
+			if (config.showSessionTitle === false && ctx?.title) lines.push(shortenText(ctx.title, 80))
+
+			if (primary) lines.push(primary)
+			else if (fallback && kind !== "ready") lines.push(fallback)
+
+			if (config.showPrompt !== false) {
+				const prompt = shortenText(conv.prompt, config.promptChars ?? 80)
+				if (prompt) lines.push(`You: ${prompt}`)
 			}
-			return lines.join("\n")
+			if (config.showReply !== false) {
+				const reply = shortenText(conv.reply, config.replyChars ?? 100)
+				if (reply) lines.push(`AI: ${reply}`)
+			}
+			if ((kind === "ready" || kind === "ended") && config.showSummary && config.summarySteps && config.summarySteps > 0) {
+				if (steps) lines.push(`Steps: ${steps}`)
+			}
+			return lines.length > 0 ? lines.join("\n") : fallback || ""
 		}
 
-		// Track the "current" session id so composeMessage knows which session to
-		// summarize. Session events carry the sessionID; we only ever summarize on
-		// idle (the value is set right before the idle handler runs).
-		let currentSessionID = null
+		// ---- content templates (optional override) ----
+		//
+		// Empty titleTemplate/bodyTemplate keeps the built-in layout above. When
+		// set, `{name}` placeholders are substituted from the notification's data.
+		// A line whose known placeholders are ALL empty is dropped when
+		// `dropEmptyLines` is true (default), which keeps "You:"/"AI:" lines from
+		// appearing with no value.
+		const contentConfig = config.content ?? {}
+		const customTitleTemplate =
+			typeof contentConfig.titleTemplate === "string" ? contentConfig.titleTemplate.trim() : ""
+		const rawBodyTemplate = contentConfig.bodyTemplate
+		const customBodyTemplate = Array.isArray(rawBodyTemplate)
+			? rawBodyTemplate.length > 0 ? rawBodyTemplate : null
+			: typeof rawBodyTemplate === "string" && rawBodyTemplate.trim()
+				? rawBodyTemplate
+				: null
+		const dropEmptyTemplateLines = contentConfig.dropEmptyLines !== false
+		const PLACEHOLDER_RE = /\{([a-zA-Z][a-zA-Z0-9]*)\}/g
+
+		const renderTemplateLine = (line, vars) => {
+			const text = String(line ?? "")
+			const matches = [...text.matchAll(PLACEHOLDER_RE)]
+			let hasKnown = false
+			let hasValue = false
+			for (const match of matches) {
+				const key = match[1]
+				if (Object.prototype.hasOwnProperty.call(vars, key)) {
+					hasKnown = true
+					if (String(vars[key] ?? "").trim()) hasValue = true
+				} else {
+					// Unknown placeholders stay visible so typos are noticeable.
+					hasValue = true
+				}
+			}
+			const rendered = text.replace(PLACEHOLDER_RE, (full, key) =>
+				Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key] ?? "") : full,
+			)
+			if (dropEmptyTemplateLines && hasKnown && !hasValue) return null
+			if (dropEmptyTemplateLines && !rendered.trim()) return null
+			return rendered
+		}
+
+		const renderTemplateText = (template, vars) => {
+			const rendered = renderTemplateLine(template, vars)
+			if (rendered === null) return ""
+			return rendered.replace(/\s+/g, " ").trim()
+		}
+
+		const renderBodyTemplate = (template, vars) => {
+			const lines = Array.isArray(template) ? template : String(template).split(/\r?\n/)
+			const out = []
+			for (const line of lines) {
+				const rendered = renderTemplateLine(line, vars)
+				if (rendered === null) continue
+				out.push(rendered)
+			}
+			return out.join("\n")
+		}
+
+		/**
+		 * Build the placeholder map for one notification. `{model}` is the
+		 * human-readable name; `{modelId}`/`{agentId}` keep the raw values.
+		 */
+		const buildTemplateVars = ({ kind, ctx = {}, conv = {}, primary, fallback, steps, sessionID, errorText, permissionTitle, questionText }) => {
+			const labels = TITLE_LABELS[kind] ?? { short: "", full: "" }
+			const timeParts = timestampParts()
+			const modelId = String(conv.model ?? "")
+			const modelName = String(conv.modelName ?? "") || modelId
+			const modelShort = shortenModelName(modelName) || modelName
+			const dir = String(ctx?.directory ?? ctx?.cwd ?? "").replace(/[\\/]+$/, "")
+			const primaryText = String(primary ?? "")
+			// For READY, don't inject the "Task complete" fallback into a custom
+			// template (it would duplicate the title). It is still used when the
+			// rendered body is completely empty.
+			const fallbackText = kind === "ready" ? "" : String(fallback ?? "")
+			const additions = Number(ctx?.summary?.additions)
+			const deletions = Number(ctx?.summary?.deletions)
+			const files = Number(ctx?.summary?.files)
+			return {
+				type: labels.short ?? "",
+				typeFull: labels.full ?? "",
+				sessionTitle: shortenText(ctx?.title, config.sessionTitleChars ?? 40),
+				sessionId: sessionID ? String(sessionID) : "",
+				project: dir ? path.basename(dir) : "",
+				cwd: ctx?.directory ?? ctx?.cwd ?? "",
+				agent: formatAgentName(conv?.agent),
+				agentId: conv?.agent ? String(conv.agent) : "",
+				model: modelName,
+				modelName,
+				modelShort,
+				modelId,
+				provider: conv?.provider ? String(conv.provider) : "",
+				meta: config.showContext === false ? "" : contextMetaBits(ctx, conv, config).join(" · "),
+				timestamp: config.showTimestamp !== false ? timeParts.timestamp : "",
+				date: timeParts.date,
+				time: timeParts.time,
+				diff: buildDiffText(ctx?.summary),
+				additions: Number.isFinite(additions) ? String(additions) : "",
+				deletions: Number.isFinite(deletions) ? String(deletions) : "",
+				files: Number.isFinite(files) ? String(files) : "",
+				prompt: config.showPrompt !== false ? shortenText(conv?.prompt, config.promptChars ?? 80) : "",
+				reply: config.showReply !== false ? shortenText(conv?.reply, config.replyChars ?? 100) : "",
+				steps:
+					(kind === "ready" || kind === "ended") && config.showSummary && config.summarySteps && config.summarySteps > 0
+						? String(steps ?? "")
+						: "",
+				primary: primaryText,
+				error: errorText ? String(errorText) : "",
+				permissionTitle: permissionTitle ? String(permissionTitle) : "",
+				question: questionText ? String(questionText) : "",
+				fallback: fallbackText,
+				status: primaryText || fallbackText,
+			}
+		}
+
+		/** Render title/message, using the custom templates when configured. */
+		const renderNotification = (args) => {
+			const vars = buildTemplateVars(args)
+			const title = customTitleTemplate
+				? renderTemplateText(customTitleTemplate, vars) || buildToastTitle(args.kind, args.ctx, config)
+				: buildToastTitle(args.kind, args.ctx, config)
+			const message = customBodyTemplate
+				? renderBodyTemplate(customBodyTemplate, vars) || String(args.fallback ?? "")
+				: composeMessage(args)
+			return { title, message }
+		}
 
 		// ---- handlers ----
 
@@ -1562,12 +2023,15 @@ export function createNotifyPlugin(overrides = {}) {
 				return
 			}
 
-			currentSessionID = sessionID
-			// Fetch the timeline once; drive BOTH the run-outcome classification and
-			// the step summary from it, so idle costs a single messages round-trip.
-			const messages = await loadSessionMessages(client, sessionID)
+			// Fetch the timeline and session context in parallel; the timeline drives
+			// the run-outcome classification, the conversation context (prompt/reply/
+			// agent) and the step summary from a single messages round-trip.
+			const [messages, ctx] = await Promise.all([
+				loadSessionMessages(client, sessionID),
+				getSessionContext(client, sessionID, info),
+			])
 			const outcome = lastRunOutcomeFromMessages(messages)
-			const ctx = await getSessionContext(client, sessionID, info)
+			const conv = await attachModelName(conversationContextFromMessages(messages))
 
 			// A run that ended in error must NOT announce READY later. This is the
 			// robust (state-based) counterpart to the 1.5s time-window suppression.
@@ -1591,13 +2055,15 @@ export function createNotifyPlugin(overrides = {}) {
 			if (outcome === "aborted" && config.notifyCancelled !== false) {
 				activeSessions.delete(sessionID)
 				claimRunNotified(ctx.updated, sessionID)
-				const message = await composeMessage({
+				const { title, message } = renderNotification({
 					kind: "cancelled",
-					title: ctx.title,
+					ctx,
+					conv,
 					fallback: "Session stopped",
+					sessionID,
 				})
 				send({
-					title: "STOPPED BY YOU",
+					title,
 					message,
 					sound: config.sounds.cancelled ?? config.sounds.idle,
 					theme: "cancelled",
@@ -1608,14 +2074,16 @@ export function createNotifyPlugin(overrides = {}) {
 
 			activeSessions.delete(sessionID)
 			claimRunNotified(ctx.updated, sessionID)
-			const message = await composeMessage({
+			const { title, message } = renderNotification({
 				kind: "ready",
-				title: ctx.title,
+				ctx,
+				conv,
 				fallback: "Task complete",
 				steps: summaryFromMessages(messages, config.summarySteps),
+				sessionID,
 			})
 			send({
-				title: "READY FOR REVIEW",
+				title,
 				message,
 				sound: config.sounds.idle,
 				theme: "ready",
@@ -1640,8 +2108,17 @@ export function createNotifyPlugin(overrides = {}) {
 
 			const text = extractErrorMessage(rawError)
 			const message = (text ?? "").slice(0, 100) || "Something went wrong"
-			const body = await composeMessage({ kind: userCancelled ? "cancelled" : "error", title: message })
-			const ctx = await getSessionContext(client, sessionID)
+			// One extra fetch gives the error toast the same identifying context as
+			// a READY toast (project / last prompt), which matters most when several
+			// agents fail around the same time.
+			const [messages, ctx] = await Promise.all([
+				loadSessionMessages(client, sessionID),
+				getSessionContext(client, sessionID),
+			])
+			const conv = await attachModelName(conversationContextFromMessages(messages))
+			const notificationKind = userCancelled ? "cancelled" : isNetwork ? "network" : "error"
+			const primary = userCancelled ? undefined : shortenText(message, 120)
+			const fallback = userCancelled ? "Session stopped" : "Something went wrong"
 			// A failed session should NOT also announce "ready" moments later.
 			// Mark the same session's ready key as recently-sent so any idle event
 			// arriving within the dedupe window is suppressed.
@@ -1670,9 +2147,19 @@ export function createNotifyPlugin(overrides = {}) {
 				}
 			}
 
+			const { title, message: body } = renderNotification({
+				kind: notificationKind,
+				ctx,
+				conv,
+				primary,
+				fallback,
+				sessionID,
+				errorText: userCancelled ? "" : message,
+			})
+
 			if (userCancelled && config.notifyCancelled !== false) {
 				send({
-					title: "STOPPED BY YOU",
+					title,
 					message: body,
 					sound: config.sounds.cancelled ?? config.sounds.idle,
 					theme: "cancelled",
@@ -1683,7 +2170,7 @@ export function createNotifyPlugin(overrides = {}) {
 			if (userCancelled) return
 			if (isNetwork) {
 				send({
-					title: "NETWORK INTERRUPTED",
+					title,
 					message: body,
 					sound: config.sounds.network,
 					theme: "network",
@@ -1692,7 +2179,7 @@ export function createNotifyPlugin(overrides = {}) {
 				beep(config.beepOnInterruption)
 			} else {
 				send({
-					title: "SOMETHING WENT WRONG",
+					title,
 					message: body,
 					sound: config.sounds.error,
 					theme: "error",
@@ -1701,27 +2188,55 @@ export function createNotifyPlugin(overrides = {}) {
 			}
 		}
 
-		const handlePermissionUpdated = async () => {
+		const handlePermissionUpdated = async (props) => {
 			if (isQuietHours(config)) return
-			const body = await composeMessage({ kind: "permission", fallback: "OpenCode needs your input" })
+			const sessionID = props?.sessionID ? String(props.sessionID) : null
+			const [ctx, messages] = sessionID
+				? await Promise.all([getSessionContext(client, sessionID), loadSessionMessages(client, sessionID)])
+				: [{}, []]
+			const conv = await attachModelName(conversationContextFromMessages(messages))
+			const permissionTitle = shortenText(props?.title, 120) || undefined
+			const { title, message: body } = renderNotification({
+				kind: "permission",
+				ctx,
+				conv,
+				primary: permissionTitle,
+				fallback: "OpenCode needs your input",
+				sessionID,
+				permissionTitle,
+			})
 			send({
-				title: "WAITING FOR CONFIRMATION",
+				title,
 				message: body,
 				sound: config.sounds.permission,
 				theme: "permission",
-				...notifyExtras(),
+				...notifyExtras({ ...ctx, sessionID }),
 			})
 		}
 
-		const handleQuestionAsked = async () => {
+		const handleQuestionAsked = async (props) => {
 			if (isQuietHours(config)) return
-			const body = await composeMessage({ kind: "question", fallback: "OpenCode needs your input" })
+			const sessionID = props?.sessionID ? String(props.sessionID) : null
+			const [ctx, messages] = sessionID
+				? await Promise.all([getSessionContext(client, sessionID), loadSessionMessages(client, sessionID)])
+				: [{}, []]
+			const conv = await attachModelName(conversationContextFromMessages(messages))
+			const questionText = shortenText(extractQuestionText(props), 120) || undefined
+			const { title, message: body } = renderNotification({
+				kind: "question",
+				ctx,
+				conv,
+				primary: questionText,
+				fallback: "OpenCode needs your input",
+				sessionID,
+				questionText,
+			})
 			send({
-				title: "QUESTION FOR YOU",
+				title,
 				message: body,
 				sound: config.sounds.question ?? config.sounds.permission,
 				theme: "question",
-				...notifyExtras(),
+				...notifyExtras({ ...ctx, sessionID }),
 			})
 		}
 
@@ -1783,13 +2298,18 @@ export function createNotifyPlugin(overrides = {}) {
 					if (heartbeatDedupe.shouldSend(runToken)) {
 						activeSessions.delete(sessionID)
 						const ctx = await getSessionContext(client, sessionID)
-						const body = await composeMessage({
-							kind: "ready",
-							title: ctx.title,
+						const messages = await loadSessionMessages(client, sessionID)
+						const conv = await attachModelName(conversationContextFromMessages(messages))
+						const { title, message: body } = renderNotification({
+							kind: "ended",
+							ctx,
+							conv,
 							fallback: "Session ended without a status event",
+							steps: summaryFromMessages(messages, config.summarySteps),
+							sessionID,
 						})
 						send({
-							title: "SESSION ENDED",
+							title,
 							message: body,
 							sound: config.sounds.idle,
 							theme: "ready",
@@ -1806,13 +2326,17 @@ export function createNotifyPlugin(overrides = {}) {
 						if (rec2) rec2.lastWarned = at
 						if (heartbeatDedupe.shouldSend(`hb-stall:${sessionID}`)) {
 							const ctx = await getSessionContext(client, sessionID)
-							const body = await composeMessage({
-								kind: "network",
-								title: "No output received — the run may be stuck or offline.",
-								fallback: ctx.title,
+							const messages = await loadSessionMessages(client, sessionID)
+							const conv = await attachModelName(conversationContextFromMessages(messages))
+							const { title, message: body } = renderNotification({
+								kind: "stalled",
+								ctx,
+								conv,
+								primary: "No output received — the run may be stuck or offline.",
+								sessionID,
 							})
 							send({
-								title: "SESSION STALLED",
+								title,
 								message: body,
 								sound: config.sounds.network,
 								theme: "network",
@@ -1843,8 +2367,13 @@ export function createNotifyPlugin(overrides = {}) {
 				try {
 					if (input?.sessionID) markActive(String(input.sessionID))
 					if (input?.tool === "question") {
-						const key = `${input?.sessionID}:${input?.callID}`
-						if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
+						// Use the SAME key shape as buildQuestionKey() so the
+						// tool.execute.before path and the question.asked event path
+						// dedupe against each other (one question -> one toast).
+						const key = input?.sessionID
+							? `question:${input.sessionID}:${input.callID ?? ""}`
+							: "question"
+						if (questionDedupe.shouldSend(key)) await handleQuestionAsked(input)
 					}
 				} catch (err) {
 					console.warn("[kdco-notify-win] tool.execute.before error:", err)
@@ -1900,12 +2429,12 @@ export function createNotifyPlugin(overrides = {}) {
 					case "permission.updated":
 					case "permission.asked": {
 						const key = props?.id ? `permission:${props.id}` : "permission"
-						if (permissionDedupe.shouldSend(key)) await handlePermissionUpdated()
+						if (permissionDedupe.shouldSend(key)) await handlePermissionUpdated(props)
 						break
 					}
 					case "question.asked": {
 						const key = buildQuestionKey(props)
-						if (questionDedupe.shouldSend(key)) await handleQuestionAsked()
+						if (questionDedupe.shouldSend(key)) await handleQuestionAsked(props)
 						break
 					}
 					}
@@ -1925,6 +2454,26 @@ function buildQuestionKey(props) {
 	if (id && callID) return `question:${id}:${callID}`
 	if (props?.id) return `question:${id}:request:${props.id}`
 	return "question"
+}
+
+/**
+ * Best-effort extraction of the question text from a `question.asked` payload
+ * (shapes vary across OpenCode versions and injection points).
+ * @param {any} props
+ * @returns {string}
+ */
+function extractQuestionText(props) {
+	const direct = props?.question ?? props?.text ?? props?.title
+	if (typeof direct === "string" && direct.trim()) return direct
+	const first = Array.isArray(props?.questions) ? props.questions[0] : null
+	if (typeof first === "string") return first
+	if (first && typeof first === "object") {
+		const value = first.question ?? first.text ?? first.label ?? first.header
+		if (typeof value === "string" && value.trim()) return value
+	}
+	const fromTool = props?.tool?.input?.question ?? props?.tool?.input?.text
+	if (typeof fromTool === "string" && fromTool.trim()) return fromTool
+	return ""
 }
 
 // ==========================================
