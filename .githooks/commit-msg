@@ -1,0 +1,128 @@
+#!/bin/sh
+# 提交信息规范门禁 (commit-msg 钩子)
+#
+# 规则来源: docs/specs/2026-10-26-提交信息规范.md
+# 钩子契约: docs/bug/2026-10-27-提交信息门禁修复方案.md §四
+# 行为: 就地修复提交信息并打印逐处改动; 门禁失败时以非零码阻断提交。
+# 职责边界: 本钩子只负责定位门禁脚本、判断上下文、拼接参数、透传退出码, 不实现任何规则。
+#
+# 安装: git config core.hooksPath .githooks
+#
+# NOTE 本文件必须是 LF 换行, CRLF 会让 sh 无法执行。
+
+# NOTE 单点共享的门禁脚本默认路径 (第三级回退)
+SHARED_CHECKER="E:/vscode-workspace-temp/tools/check_commit_msg.py"
+
+# NOTE 判断一个取值是否视为真: 1 / true / yes / on (大小写不敏感) 为真; false / 0 / no / off / 空 为假。
+is_truthy() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        false|0|no|off) return 1 ;;
+        "") return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# STEP 校验入参: 提交信息文件路径
+if [ $# -lt 1 ] || [ -z "$1" ]; then
+    echo "提交信息门禁：没有拿到提交信息文件路径，阻断提交。" >&2
+    exit 1
+fi
+msg_file="$1"
+
+# STEP 显式豁免: 临时改历史或抢救场景可用环境变量整体跳过校验
+if [ "${COMMIT_MSG_GATE_SKIP:-}" = "1" ]; then
+    echo "提交信息门禁：已按 COMMIT_MSG_GATE_SKIP=1 跳过校验。" >&2
+    exit 0
+fi
+
+# STEP 定位仓库根目录
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$root" ]; then
+    echo "提交信息门禁：无法定位仓库根目录 (git rev-parse --show-toplevel 失败) ，阻断提交。" >&2
+    exit 1
+fi
+
+# STEP 定位门禁脚本: 环境变量 -> 仓内 tools/ -> 单点共享默认路径
+checker=""
+shared_used=0
+if [ -n "$COMMIT_MSG_GATE_TOOL" ]; then
+    if [ -f "$COMMIT_MSG_GATE_TOOL" ]; then
+        checker="$COMMIT_MSG_GATE_TOOL"
+    else
+        echo "提交信息门禁：环境变量 COMMIT_MSG_GATE_TOOL 指向的文件不存在：$COMMIT_MSG_GATE_TOOL，阻断提交。" >&2
+        exit 1
+    fi
+elif [ -f "$root/tools/check_commit_msg.py" ]; then
+    checker="$root/tools/check_commit_msg.py"
+elif [ -f "$SHARED_CHECKER" ]; then
+    checker="$SHARED_CHECKER"
+    shared_used=1
+else
+    echo "提交信息门禁：找不到门禁脚本，已查找：" >&2
+    echo "  1) 环境变量 COMMIT_MSG_GATE_TOOL：${COMMIT_MSG_GATE_TOOL:-<未设置>}" >&2
+    echo "  2) 仓内路径：$root/tools/check_commit_msg.py" >&2
+    echo "  3) 共享默认路径：$SHARED_CHECKER" >&2
+    echo "提交信息门禁：阻断提交。" >&2
+    exit 1
+fi
+
+# NOTE 命中共享默认路径时打印一行提示，说明脚本来源
+if [ "$shared_used" -eq 1 ]; then
+    echo "提交信息门禁：使用共享门禁脚本：$checker"
+fi
+
+# STEP 场景判定: 按 GIT_REFLOG_ACTION 识别当前操作
+# rebase / cherry-pick / revert / am 搬运的都是既有提交信息, 降级为只提示不阻断
+# merge 提交由脚本按 `Merge ` 前缀自动识别, 这里显式传 context 以保持只读语义
+advisory=0
+context="commit"
+case "${GIT_REFLOG_ACTION:-}" in
+    rebase*) advisory=1 ;;
+    cherry-pick*|revert*|am*) advisory=1 ;;
+    merge*) context="merge" ;;
+esac
+
+# STEP 多行开关: 环境变量 或 git 配置键, 任一为真即放行多行提交信息
+allow_multiline=0
+if [ -n "${COMMIT_MSG_GATE_ALLOW_MULTILINE:-}" ] && is_truthy "$COMMIT_MSG_GATE_ALLOW_MULTILINE"; then
+    allow_multiline=1
+else
+    cfg_multiline=$(git config --get commitMsgGate.allowMultiline 2>/dev/null)
+    if [ -n "$cfg_multiline" ] && is_truthy "$cfg_multiline"; then
+        allow_multiline=1
+    fi
+fi
+
+# STEP 探测 python 解释器: 优先 python, 回落到 python3
+if command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    echo "提交信息门禁：找不到 python 解释器，阻断提交。" >&2
+    exit 1
+fi
+
+# STEP 拼接门禁参数
+set -- --apply --file "$msg_file"
+if [ "$advisory" -eq 1 ]; then
+    set -- "$@" --advisory
+fi
+if [ "$allow_multiline" -eq 1 ]; then
+    set -- "$@" --allow-multiline
+fi
+if [ "$context" != "commit" ]; then
+    set -- "$@" --context "$context"
+fi
+
+# STEP 调用门禁脚本并原样透传退出码
+"$py" "$checker" "$@"
+status=$?
+
+if [ "$status" -ne 0 ]; then
+    echo "提交信息门禁：门禁未通过 (退出码 $status) ，阻断提交。" >&2
+    exit "$status"
+fi
+
+exit 0
