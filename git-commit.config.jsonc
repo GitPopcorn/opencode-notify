@@ -1,0 +1,54 @@
+{
+	"schemaVersion": 1,
+	"meta": {
+		"id": "kdcokenny-opencode-notify",
+		"description": "Commit Message Configuration for Rule Combination [G3]"
+	},
+	"commitMessage": {
+		"line": {
+			"mode": "single",
+			"maxLength": 200
+		},
+		"standardPrefix": {
+			"mode": "auto",
+			"patterns": []
+		},
+		"device": {
+			"required": false,
+			"whitelist": [],
+			"sources": [
+				".git/info/device-name.txt",
+				"hostname"
+			]
+		},
+		"examples": [
+			"feat: add session-aware notification content and content templates"
+		],
+		"instructions": {
+			"punctuation": [
+				"Use ASCII punctuation in English sentences, one consistent style per sentence."
+			],
+			"purpose": [
+				"The first one or two clauses summarize the intent of the change; at least one clause is mandatory and must not list file names.",
+				"Further detail about which parts changed is optional and follows the summary."
+			],
+			"structure": [
+				"Keep a clear boundary between the summary part and the detail part.",
+				"Do not use full stops or semicolons for layering; use parentheses or list prefixes instead."
+			]
+		}
+	},
+	"gate": {
+		"command": "python E:/vscode-workspace-temp/tools/check_commit_msg.py --check --file {file} --repo {repo}",
+		"passCodes": [
+			0
+		],
+		"passPattern": ""
+	},
+	"notes": [
+		"This repository follows rule set [G3], the typical form is `type(scope): summary`.",
+		"The type must consist only of lowercase letters, digits, and underscores, with a maximum length of 10 characters (e.g., chore, feat, docs).",
+		// "The type should adhere to the Conventional Commits specification as closely as possible.",
+		"Single line only: no date prefix, no device code, no AI marker, no Chinese punctuation."
+	]
+}
